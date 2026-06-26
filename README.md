@@ -80,9 +80,7 @@ bun run auth:hash -- <你的密码>
 bun run deploy
 ```
 
-把 D1 创建命令返回的 `database_id` 和密码 hash 填入本机 `.env.local`。`.env.local` 已被 `.gitignore` 忽略，不要提交。
-
-GitHub Actions 不是自部署必须项。本仓库的 workflow 用于维护者自动发布演示实例；普通 fork 用户只需要配置自己的 Cloudflare 账号、D1、R2 和登录密码即可。
+把 D1 创建命令返回的 `database_id` 和密码 hash 填入本机 `.env.local`。
 
 ## 目录结构
 
