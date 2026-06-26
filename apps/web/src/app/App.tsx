@@ -23,6 +23,7 @@ import {
   MoreHorizontal,
   PanelLeft,
   Plus,
+  RotateCcw,
   Save,
   Search,
   Sparkles,
@@ -38,6 +39,7 @@ import { buildNotebookTree, cn, formatDateTime, parseTagsText, type NotebookNode
 import { Button } from "@/components/ui/button";
 
 type Pane = "notebooks" | "memos" | "editor";
+type MemoView = "notebook" | "trash";
 
 const IMAGE_COMPRESSION_STORAGE_KEY = "edgeever.imageCompressionEnabled";
 
@@ -121,6 +123,7 @@ const WorkspaceApp = ({
 }) => {
   const queryClient = useQueryClient();
   const [activePane, setActivePane] = useState<Pane>("memos");
+  const [memoView, setMemoView] = useState<MemoView>("notebook");
   const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(null);
   const [selectedMemoId, setSelectedMemoId] = useState<string | null>(null);
   const [selectedMemoIds, setSelectedMemoIds] = useState<Set<string>>(new Set());
@@ -171,9 +174,14 @@ const WorkspaceApp = ({
   }, [imageCompressionEnabled]);
 
   const memosQuery = useQuery({
-    queryKey: ["memos", selectedNotebookId, search],
-    queryFn: () => api.listMemos({ notebookId: selectedNotebookId, q: search }),
-    enabled: Boolean(selectedNotebookId),
+    queryKey: ["memos", memoView, selectedNotebookId, search],
+    queryFn: () =>
+      api.listMemos({
+        notebookId: memoView === "notebook" ? selectedNotebookId : null,
+        q: search,
+        trash: memoView === "trash",
+      }),
+    enabled: memoView === "trash" || Boolean(selectedNotebookId),
   });
 
   const memos = memosQuery.data?.memos ?? [];
@@ -190,8 +198,8 @@ const WorkspaceApp = ({
   }, [memos, selectedMemoId]);
 
   const memoQuery = useQuery({
-    queryKey: ["memo", selectedMemoId],
-    queryFn: () => api.getMemo(selectedMemoId as string),
+    queryKey: ["memo", selectedMemoId, memoView],
+    queryFn: () => api.getMemo(selectedMemoId as string, { includeDeleted: memoView === "trash" }),
     enabled: Boolean(selectedMemoId),
   });
 
@@ -207,6 +215,7 @@ const WorkspaceApp = ({
   const createMemoMutation = useMutation({
     mutationFn: api.createMemo,
     onSuccess: async (data) => {
+      setMemoView("notebook");
       await queryClient.invalidateQueries({ queryKey: ["memos"] });
       queryClient.setQueryData(["memo", data.memo.id], { memo: data.memo });
       setSelectedMemoId(data.memo.id);
@@ -226,9 +235,22 @@ const WorkspaceApp = ({
   });
 
   const deleteMemoMutation = useMutation({
-    mutationFn: api.deleteMemo,
+    mutationFn: ({ memoId, permanent }: { memoId: string; permanent?: boolean }) =>
+      api.deleteMemo(memoId, { permanent }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["memos"] });
+    },
+  });
+
+  const restoreMemoMutation = useMutation({
+    mutationFn: api.restoreMemo,
+    onSuccess: async (data) => {
+      setMemoView("notebook");
+      await queryClient.invalidateQueries({ queryKey: ["memos"] });
+      queryClient.setQueryData(["memo", data.memo.id], { memo: data.memo });
+      setSelectedNotebookId(data.memo.notebookId);
+      setSelectedMemoId(data.memo.id);
+      setActivePane("editor");
     },
   });
 
@@ -246,7 +268,7 @@ const WorkspaceApp = ({
   };
 
   const handleCreateMemo = () => {
-    if (!selectedNotebookId) {
+    if (!selectedNotebookId || memoView === "trash") {
       return;
     }
 
@@ -259,7 +281,7 @@ const WorkspaceApp = ({
   };
 
   const handleMerge = () => {
-    if (!selectedNotebookId || selectedMemoIds.size < 2) {
+    if (!selectedNotebookId || selectedMemoIds.size < 2 || memoView === "trash") {
       return;
     }
 
@@ -286,6 +308,7 @@ const WorkspaceApp = ({
             selectedNotebookId={selectedNotebookId}
             isLoading={notebooksQuery.isLoading}
             onSelect={(notebookId) => {
+              setMemoView("notebook");
               setSelectedNotebookId(notebookId);
               setSelectedMemoIds(new Set());
               setActivePane("memos");
@@ -297,6 +320,12 @@ const WorkspaceApp = ({
             imageCompressionEnabled={imageCompressionEnabled}
             onImageCompressionChange={setImageCompressionEnabled}
             onOpenAssets={() => setAssetsOpen(true)}
+            onOpenTrash={() => {
+              setMemoView("trash");
+              setSelectedMemoIds(new Set());
+              setSelectedMemoId(null);
+              setActivePane("memos");
+            }}
           />
         </aside>
 
@@ -308,6 +337,7 @@ const WorkspaceApp = ({
         >
           <MemoListPane
             notebook={selectedNotebook}
+            view={memoView}
             memos={memos}
             selectedMemoId={selectedMemoId}
             selectedMemoIds={selectedMemoIds}
@@ -333,6 +363,7 @@ const WorkspaceApp = ({
         <section className={cn("min-h-0 min-w-0 bg-white lg:block", activePane === "editor" ? "block" : "hidden")}>
           <EditorPane
             memo={selectedMemo}
+            isTrashView={memoView === "trash"}
             notebooks={notebooks}
             isLoading={memoQuery.isLoading}
             imageCompressionEnabled={imageCompressionEnabled}
@@ -342,9 +373,17 @@ const WorkspaceApp = ({
               await queryClient.invalidateQueries({ queryKey: ["memos"] });
             }}
             onDeleted={async (memoId) => {
-              await deleteMemoMutation.mutateAsync(memoId);
+              await deleteMemoMutation.mutateAsync({ memoId });
               setSelectedMemoId(null);
               setActivePane("memos");
+            }}
+            onPermanentDeleted={async (memoId) => {
+              await deleteMemoMutation.mutateAsync({ memoId, permanent: true });
+              setSelectedMemoId(null);
+              setActivePane("memos");
+            }}
+            onRestored={async (memoId) => {
+              await restoreMemoMutation.mutateAsync(memoId);
             }}
           />
         </section>
@@ -474,6 +513,7 @@ const NotebookPane = ({
   imageCompressionEnabled,
   onImageCompressionChange,
   onOpenAssets,
+  onOpenTrash,
 }: {
   authRequired: boolean;
   user: AuthUser | null;
@@ -488,6 +528,7 @@ const NotebookPane = ({
   imageCompressionEnabled: boolean;
   onImageCompressionChange: (enabled: boolean) => void;
   onOpenAssets: () => void;
+  onOpenTrash: () => void;
 }) => {
   const tree = useMemo(() => buildNotebookTree(notebooks), [notebooks]);
 
@@ -544,12 +585,15 @@ const NotebookPane = ({
             aria-label="粘贴图片时自动压缩"
           />
         </label>
-        <div className={cn("grid gap-2", authRequired ? "grid-cols-4" : "grid-cols-3")}>
+        <div className={cn("grid gap-2", authRequired ? "grid-cols-5" : "grid-cols-4")}>
           <Button size="icon" variant="ghost" title="标签">
             <Tags className="h-4 w-4" />
           </Button>
           <Button size="icon" variant="ghost" title="资产" onClick={onOpenAssets}>
             <Archive className="h-4 w-4" />
+          </Button>
+          <Button size="icon" variant="ghost" title="回收站" onClick={onOpenTrash}>
+            <Trash2 className="h-4 w-4" />
           </Button>
           <Button size="icon" variant="ghost" title="设置">
             <MoreHorizontal className="h-4 w-4" />
@@ -638,6 +682,7 @@ const NotebookTreeItem = ({
 
 const MemoListPane = ({
   notebook,
+  view,
   memos,
   selectedMemoId,
   selectedMemoIds,
@@ -654,6 +699,7 @@ const MemoListPane = ({
   onMerge,
 }: {
   notebook: Notebook | null;
+  view: MemoView;
   memos: MemoSummary[];
   selectedMemoId: string | null;
   selectedMemoIds: Set<string>;
@@ -677,11 +723,22 @@ const MemoListPane = ({
             <PanelLeft className="h-4 w-4" />
           </Button>
           <div className="min-w-0">
-            <div className="truncate text-lg font-semibold text-slate-950 lg:text-sm">{notebook?.name ?? "全部笔记"}</div>
-            <div className="text-xs text-slate-500">{memos.length} memos</div>
+            <div className="truncate text-lg font-semibold text-slate-950 lg:text-sm">
+              {view === "trash" ? "回收站" : notebook?.name ?? "全部笔记"}
+            </div>
+            <div className="text-xs text-slate-500">
+              {memos.length} {view === "trash" ? "trashed" : "memos"}
+            </div>
           </div>
         </div>
-        <Button className="hidden lg:inline-flex" size="icon" variant="solid" title="新建笔记" onClick={onCreateMemo} disabled={!notebook || isCreating}>
+        <Button
+          className="hidden lg:inline-flex"
+          size="icon"
+          variant="solid"
+          title="新建笔记"
+          onClick={onCreateMemo}
+          disabled={!notebook || isCreating || view === "trash"}
+        >
           <FilePlus2 className="h-4 w-4" />
         </Button>
       </div>
@@ -703,7 +760,12 @@ const MemoListPane = ({
             <CheckSquare className="h-4 w-4 text-emerald-700" />
             {selectedMemoIds.size} selected
           </div>
-          <Button size="sm" variant="solid" onClick={onMerge} disabled={selectedMemoIds.size < 2 || isMerging}>
+          <Button
+            size="sm"
+            variant="solid"
+            onClick={onMerge}
+            disabled={selectedMemoIds.size < 2 || isMerging || view === "trash"}
+          >
             <Merge className="h-4 w-4" />
             合并
           </Button>
@@ -714,7 +776,7 @@ const MemoListPane = ({
         <div className="px-2 py-4 text-sm text-slate-500">加载中</div>
       ) : memos.length === 0 ? (
         <div className="rounded-md border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm text-slate-500">
-          No memos
+          {view === "trash" ? "回收站为空" : "No memos"}
         </div>
       ) : (
         <div className="space-y-2">
@@ -738,6 +800,7 @@ const MemoListPane = ({
         title="新建笔记"
         onClick={onCreateMemo}
         disabled={!notebook || isCreating}
+        hidden={view === "trash"}
       >
         <FilePlus2 className="h-5 w-5" />
         新建
@@ -966,34 +1029,45 @@ const formatBytes = (bytes: number) => {
 
 const EditorPane = ({
   memo,
+  isTrashView,
   notebooks,
   isLoading,
   imageCompressionEnabled,
   onBackToList,
   onSaved,
   onDeleted,
+  onPermanentDeleted,
+  onRestored,
 }: {
   memo: MemoDetail | null;
+  isTrashView: boolean;
   notebooks: Notebook[];
   isLoading: boolean;
   imageCompressionEnabled: boolean;
   onBackToList: () => void;
   onSaved: (memo: MemoDetail) => Promise<void>;
   onDeleted: (memoId: string) => Promise<void>;
+  onPermanentDeleted: (memoId: string) => Promise<void>;
+  onRestored: (memoId: string) => Promise<void>;
 }) => {
   const queryClient = useQueryClient();
   const [title, setTitle] = useState("");
   const [tagsText, setTagsText] = useState("");
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error" | "conflict">("idle");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [dirtyVersion, setDirtyVersion] = useState(0);
   const [imageUploadState, setImageUploadState] = useState<"idle" | "compressing" | "uploading" | "error">("idle");
   const memoRef = useRef<MemoDetail | null>(memo);
   const editorRef = useRef<Editor | null>(null);
+  const hydratingRef = useRef(false);
+  const hasUnsavedChangesRef = useRef(false);
+  const editingMemoIdRef = useRef<string | null>(memo?.id ?? null);
   const imageCompressionEnabledRef = useRef(imageCompressionEnabled);
   const insertImageFiles = useCallback((files: File[]) => {
     const currentMemo = memoRef.current;
     const currentEditor = editorRef.current;
 
-    if (!currentMemo || !currentEditor || files.length === 0) {
+    if (!currentMemo || currentMemo.isDeleted || !currentEditor || files.length === 0) {
       return;
     }
 
@@ -1047,6 +1121,7 @@ const EditorPane = ({
       }),
     ],
     content: memo?.contentJson ?? { type: "doc", content: [{ type: "paragraph" }] },
+    editable: !memo?.isDeleted,
     editorProps: {
       attributes: {
         class: "prose prose-slate max-w-none",
@@ -1077,10 +1152,6 @@ const EditorPane = ({
   });
 
   useEffect(() => {
-    memoRef.current = memo;
-  }, [memo]);
-
-  useEffect(() => {
     imageCompressionEnabledRef.current = imageCompressionEnabled;
   }, [imageCompressionEnabled]);
 
@@ -1094,21 +1165,92 @@ const EditorPane = ({
     };
   }, [editor]);
 
-  useEffect(() => {
-    if (!memo) {
-      setTitle("");
-      setTagsText("");
-      editor?.commands.clearContent();
+  const persistCurrentDraft = useCallback(
+    (nextTitle = title, nextTagsText = tagsText) => {
+      const currentMemo = memoRef.current;
+      const currentEditor = editorRef.current;
+
+      if (!currentMemo || currentMemo.isDeleted || !currentEditor) {
+        return;
+      }
+
+      void localDb.drafts.put({
+        memoId: currentMemo.id,
+        title: nextTitle,
+        tagsText: nextTagsText,
+        contentJson: currentEditor.getJSON() as TiptapDoc,
+        updatedAt: new Date().toISOString(),
+      });
+    },
+    [tagsText, title]
+  );
+
+  const markDirty = useCallback(() => {
+    const currentMemo = memoRef.current;
+
+    if (hydratingRef.current || currentMemo?.isDeleted) {
       return;
     }
 
+    hasUnsavedChangesRef.current = true;
+    setHasUnsavedChanges(true);
+    setDirtyVersion((version) => version + 1);
+    setSaveState((current) => (current === "conflict" ? current : "idle"));
+  }, []);
+
+  const currentSnapshot = useCallback(() => {
+    const currentEditor = editorRef.current;
+
+    if (!currentEditor) {
+      return null;
+    }
+
+    return JSON.stringify({
+      title,
+      tagsText,
+      contentJson: currentEditor.getJSON(),
+    });
+  }, [tagsText, title]);
+
+  useEffect(() => {
+    const currentEditor = editorRef.current;
+
+    if (!memo) {
+      memoRef.current = null;
+      editingMemoIdRef.current = null;
+      hasUnsavedChangesRef.current = false;
+      setHasUnsavedChanges(false);
+      setTitle("");
+      setTagsText("");
+      setSaveState("idle");
+      currentEditor?.commands.clearContent();
+      return;
+    }
+
+    const sameMemo = editingMemoIdRef.current === memo.id;
+    memoRef.current = memo;
+    currentEditor?.setEditable(!memo.isDeleted);
+
+    if (sameMemo && hasUnsavedChangesRef.current && !memo.isDeleted) {
+      return;
+    }
+
+    hydratingRef.current = true;
+    editingMemoIdRef.current = memo.id;
+    hasUnsavedChangesRef.current = false;
+    setHasUnsavedChanges(false);
+    setSaveState("idle");
     setTitle(memo.title ?? "");
     setTagsText(memo.tags.join(", "));
 
-    if (editor) {
-      editor.commands.setContent(memo.contentJson);
+    if (currentEditor) {
+      currentEditor.commands.setContent(memo.contentJson);
     }
-  }, [editor, memo]);
+
+    window.setTimeout(() => {
+      hydratingRef.current = false;
+    }, 0);
+  }, [memo, editor]);
 
   useEffect(() => {
     if (!editor || !memo) {
@@ -1116,43 +1258,91 @@ const EditorPane = ({
     }
 
     const persistDraft = () => {
-      void localDb.drafts.put({
-        memoId: memo.id,
-        title,
-        tagsText,
-        contentJson: editor.getJSON() as TiptapDoc,
-        updatedAt: new Date().toISOString(),
-      });
+      if (hydratingRef.current || memoRef.current?.isDeleted) {
+        return;
+      }
+
+      persistCurrentDraft();
+      markDirty();
     };
 
     editor.on("update", persistDraft);
     return () => {
       editor.off("update", persistDraft);
     };
-  }, [editor, memo, tagsText, title]);
+  }, [editor, markDirty, memo, persistCurrentDraft]);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      if (!memo || !editor) {
+      const currentMemo = memoRef.current;
+      const currentEditor = editorRef.current;
+
+      if (!currentMemo || !currentEditor) {
         throw new Error("No memo selected");
       }
 
-      return api.updateMemo(memo.id, {
-        expectedRevision: memo.revision,
+      if (currentMemo.isDeleted) {
+        throw new Error("Deleted memos are read-only");
+      }
+
+      const snapshot = currentSnapshot();
+
+      if (!snapshot) {
+        throw new Error("Editor is not ready");
+      }
+
+      const data = await api.updateMemo(currentMemo.id, {
+        expectedRevision: currentMemo.revision,
         title,
-        contentJson: editor.getJSON() as TiptapDoc,
+        contentJson: currentEditor.getJSON() as TiptapDoc,
         tags: parseTagsText(tagsText),
       });
+
+      return { memo: data.memo, snapshot };
     },
     onMutate: () => setSaveState("saving"),
-    onSuccess: async (data) => {
-      await localDb.drafts.delete(data.memo.id);
-      await onSaved(data.memo);
-      setSaveState("saved");
-      window.setTimeout(() => setSaveState("idle"), 1400);
+    onSuccess: async ({ memo: savedMemo, snapshot }) => {
+      memoRef.current = savedMemo;
+      await onSaved(savedMemo);
+
+      if (currentSnapshot() === snapshot) {
+        hasUnsavedChangesRef.current = false;
+        setHasUnsavedChanges(false);
+        await localDb.drafts.delete(savedMemo.id);
+        setSaveState("saved");
+        window.setTimeout(() => setSaveState("idle"), 1400);
+        return;
+      }
+
+      persistCurrentDraft();
+      hasUnsavedChangesRef.current = true;
+      setHasUnsavedChanges(true);
+      setSaveState("idle");
     },
-    onError: () => setSaveState("idle"),
+    onError: (error) => {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : null;
+      setSaveState(code === "revision_conflict" ? "conflict" : "error");
+    },
   });
+
+  useEffect(() => {
+    if (
+      !memo ||
+      memo.isDeleted ||
+      !editor ||
+      !hasUnsavedChanges ||
+      saveMutation.isPending ||
+      saveState === "conflict"
+    ) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      saveMutation.mutate();
+    }, 1200);
+
+    return () => window.clearTimeout(timer);
+  }, [dirtyVersion, editor, hasUnsavedChanges, memo, saveMutation, saveState]);
 
   if (isLoading) {
     return <div className="flex h-full items-center justify-center text-sm text-slate-500">加载中</div>;
@@ -1169,6 +1359,20 @@ const EditorPane = ({
     );
   }
 
+  const readOnly = isTrashView || memo.isDeleted;
+  const saveLabel =
+    saveState === "saving"
+      ? "保存中"
+      : saveState === "saved"
+        ? "已保存"
+        : saveState === "conflict"
+          ? "有冲突"
+          : saveState === "error"
+            ? "保存失败"
+            : hasUnsavedChanges
+              ? "未保存"
+              : "已保存";
+
   return (
     <div className="flex h-full min-w-0 flex-col">
       <header className="shrink-0 border-b border-emerald-100 bg-white">
@@ -1180,6 +1384,7 @@ const EditorPane = ({
             <select
               value={memo.notebookId}
               className="h-8 min-w-0 max-w-[170px] rounded-md border border-emerald-100 bg-emerald-50/70 px-2 text-xs text-emerald-900 outline-none sm:max-w-none"
+              disabled={readOnly}
               onChange={(event) => {
                 void api
                   .updateMemo(memo.id, {
@@ -1214,20 +1419,53 @@ const EditorPane = ({
                     : "图片上传中"}
               </span>
             ) : null}
-            <Button size="sm" variant="ghost" title="删除笔记" onClick={() => void onDeleted(memo.id)}>
-              <Trash2 className="h-4 w-4" />
-            </Button>
-            <Button size="sm" variant="solid" onClick={() => saveMutation.mutate()} disabled={!editor || saveMutation.isPending}>
-              <Save className="h-4 w-4" />
-              {saveState === "saving" ? "保存中" : saveState === "saved" ? "已保存" : "保存"}
-            </Button>
+            {readOnly ? (
+              <>
+                <Button size="sm" variant="solid" title="恢复笔记" onClick={() => void onRestored(memo.id)}>
+                  <RotateCcw className="h-4 w-4" />
+                  恢复
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="彻底删除"
+                  onClick={() => {
+                    if (window.confirm("彻底删除后无法恢复，确认继续吗？")) {
+                      void onPermanentDeleted(memo.id);
+                    }
+                  }}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button size="sm" variant="ghost" title="删除笔记" onClick={() => void onDeleted(memo.id)}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="solid"
+                  onClick={() => saveMutation.mutate()}
+                  disabled={!editor || saveMutation.isPending || !hasUnsavedChanges}
+                >
+                  <Save className="h-4 w-4" />
+                  {saveLabel}
+                </Button>
+              </>
+            )}
           </div>
         </div>
 
         <div className="space-y-3 px-4 pb-4 sm:px-7">
           <input
             value={title}
-            onChange={(event) => setTitle(event.target.value)}
+            readOnly={readOnly}
+            onChange={(event) => {
+              setTitle(event.target.value);
+              persistCurrentDraft(event.target.value, tagsText);
+              markDirty();
+            }}
             className="block w-full border-0 bg-transparent text-2xl font-semibold leading-tight text-slate-950 outline-none placeholder:text-slate-300 sm:text-3xl"
             placeholder="Untitled memo"
           />
@@ -1235,7 +1473,12 @@ const EditorPane = ({
             <Tags className="h-4 w-4" />
             <input
               value={tagsText}
-              onChange={(event) => setTagsText(event.target.value)}
+              readOnly={readOnly}
+              onChange={(event) => {
+                setTagsText(event.target.value);
+                persistCurrentDraft(title, event.target.value);
+                markDirty();
+              }}
               className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
               placeholder="tags"
             />

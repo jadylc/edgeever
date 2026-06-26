@@ -100,7 +100,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  listMemos: (params: { notebookId?: string | null; q?: string }) => {
+  listMemos: (params: { notebookId?: string | null; q?: string; trash?: boolean }) => {
     const search = new URLSearchParams();
 
     if (params.notebookId) {
@@ -109,6 +109,10 @@ export const api = {
 
     if (params.q?.trim()) {
       search.set("q", params.q.trim());
+    }
+
+    if (params.trash) {
+      search.set("trash", "1");
     }
 
     return request<ListMemosResponse>(`/api/v1/memos?${search.toString()}`);
@@ -120,7 +124,16 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  getMemo: (memoId: string) => request<MemoResponse>(`/api/v1/memos/${memoId}`),
+  getMemo: (memoId: string, options?: { includeDeleted?: boolean }) => {
+    const search = new URLSearchParams();
+
+    if (options?.includeDeleted) {
+      search.set("includeDeleted", "1");
+    }
+
+    const suffix = search.toString() ? `?${search.toString()}` : "";
+    return request<MemoResponse>(`/api/v1/memos/${memoId}${suffix}`);
+  },
 
   listResources: () => request<ListResourcesResponse>("/api/v1/resources"),
 
@@ -150,9 +163,23 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  deleteMemo: (memoId: string) =>
-    request<{ ok: true }>(`/api/v1/memos/${memoId}`, {
+  deleteMemo: (memoId: string, options?: { permanent?: boolean }) => {
+    const search = new URLSearchParams();
+
+    if (options?.permanent) {
+      search.set("permanent", "1");
+    }
+
+    const suffix = search.toString() ? `?${search.toString()}` : "";
+    return request<{ ok: true }>(`/api/v1/memos/${memoId}${suffix}`, {
       method: "DELETE",
+    });
+  },
+
+  restoreMemo: (memoId: string) =>
+    request<MemoResponse>(`/api/v1/memos/${memoId}/restore`, {
+      method: "POST",
+      body: JSON.stringify({}),
     }),
 
   mergeMemos: (payload: { memoIds: string[]; notebookId?: string; title?: string }) =>

@@ -64,8 +64,10 @@ type MemoSummaryRow = {
   tags_json: string;
   is_pinned: number;
   is_archived: number;
+  is_deleted: number;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
   revision: number;
 };
 
@@ -353,25 +355,46 @@ app.delete("/api/v1/notebooks/:id", async (c) => {
 app.get("/api/v1/memos", async (c) => {
   const notebookId = c.req.query("notebookId");
   const q = c.req.query("q")?.trim();
+  const includeTrash = c.req.query("trash") === "1";
   const limit = clampNumber(Number(c.req.query("limit") ?? 80), 1, 100);
+  const deletedClause = includeTrash ? "m.is_deleted = 1" : "m.is_deleted = 0";
 
   if (q) {
     const ftsQuery = toFtsQuery(q);
+    const likeQuery = `%${escapeLike(q)}%`;
 
     if (ftsQuery) {
       const rows = await c.env.DB.prepare(
-        `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-                m.is_archived, m.created_at, m.updated_at, c.revision
-         FROM memos_fts f
-         INNER JOIN memos m ON m.id = f.memo_id
+        `WITH raw_matches(memo_id, rank) AS (
+           SELECT memo_id, bm25(memos_fts)
+           FROM memos_fts
+           WHERE memos_fts MATCH ?
+
+           UNION ALL
+
+           SELECT m.id, 100.0
+           FROM memos m
+           INNER JOIN memo_contents c ON c.memo_id = m.id
+           WHERE m.title LIKE ? ESCAPE '\\'
+              OR c.content_text LIKE ? ESCAPE '\\'
+              OR m.tags_json LIKE ? ESCAPE '\\'
+         ),
+         search_matches AS (
+           SELECT memo_id, MIN(rank) AS rank
+           FROM raw_matches
+           GROUP BY memo_id
+         )
+         SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
+                m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision
+         FROM search_matches s
+         INNER JOIN memos m ON m.id = s.memo_id
          INNER JOIN memo_contents c ON c.memo_id = m.id
-         WHERE memos_fts MATCH ?
-           AND m.is_deleted = 0
+         WHERE ${deletedClause}
            AND (? IS NULL OR m.notebook_id = ?)
-         ORDER BY m.is_pinned DESC, m.updated_at DESC
+         ORDER BY s.rank ASC, m.is_pinned DESC, m.updated_at DESC
          LIMIT ?`
       )
-        .bind(ftsQuery, notebookId ?? null, notebookId ?? null, limit)
+        .bind(ftsQuery, likeQuery, likeQuery, likeQuery, notebookId ?? null, notebookId ?? null, limit)
         .all<MemoSummaryRow>();
 
       return c.json({ memos: rows.results.map(mapMemoSummary) });
@@ -380,12 +403,12 @@ app.get("/api/v1/memos", async (c) => {
 
   const rows = await c.env.DB.prepare(
     `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-            m.is_archived, m.created_at, m.updated_at, c.revision
+            m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision
      FROM memos m
      INNER JOIN memo_contents c ON c.memo_id = m.id
-     WHERE m.is_deleted = 0
+     WHERE ${deletedClause}
        AND (? IS NULL OR m.notebook_id = ?)
-     ORDER BY m.is_pinned DESC, m.updated_at DESC
+     ORDER BY ${includeTrash ? "m.deleted_at DESC," : "m.is_pinned DESC,"} m.updated_at DESC
      LIMIT ?`
   )
     .bind(notebookId ?? null, notebookId ?? null, limit)
@@ -432,7 +455,8 @@ app.post("/api/v1/memos", zValidator("json", MemoCreateSchema), async (c) => {
 });
 
 app.get("/api/v1/memos/:id", async (c) => {
-  const memo = await getMemoDetail(c.env.DB, c.req.param("id"));
+  const includeDeleted = c.req.query("includeDeleted") === "1";
+  const memo = await getMemoDetail(c.env.DB, c.req.param("id"), includeDeleted);
 
   if (!memo) {
     return notFound(c, "Memo not found");
@@ -686,7 +710,33 @@ app.patch("/api/v1/memos/:id", zValidator("json", MemoUpdateSchema), async (c) =
 app.delete("/api/v1/memos/:id", async (c) => {
   const id = c.req.param("id");
   const actor = getAuditActor(c);
+  const permanent = c.req.query("permanent") === "1";
   const now = isoNow();
+
+  if (permanent) {
+    const current = await getMemoDetailRow(c.env.DB, id, true);
+
+    if (!current || current.is_deleted === 0) {
+      return notFound(c, "Memo not found in trash");
+    }
+
+    const resources = await getResourceRowsForMemo(c.env.DB, id);
+
+    if (resources.length > 0) {
+      await c.env.RESOURCES.delete(resources.map((resource) => resource.object_key));
+    }
+
+    await c.env.DB.batch([
+      c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM resources WHERE memo_id = ?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM memo_revisions WHERE memo_id = ?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM memo_contents WHERE memo_id = ?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM memos WHERE id = ? AND is_deleted = 1`).bind(id),
+      auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.delete_permanent", "memo", id, {}),
+    ]);
+
+    return c.json({ ok: true });
+  }
 
   await c.env.DB.batch([
     c.env.DB.prepare(
@@ -694,10 +744,40 @@ app.delete("/api/v1/memos/:id", async (c) => {
        SET is_deleted = 1, deleted_at = ?, updated_at = ?
        WHERE id = ? AND is_deleted = 0`
     ).bind(now, now, id),
+    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
     auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.delete", "memo", id, {}),
   ]);
 
   return c.json({ ok: true });
+});
+
+app.post("/api/v1/memos/:id/restore", async (c) => {
+  const id = c.req.param("id");
+  const actor = getAuditActor(c);
+  const current = await getMemoDetailRow(c.env.DB, id, true);
+
+  if (!current || current.is_deleted === 0) {
+    return notFound(c, "Memo not found in trash");
+  }
+
+  const tags = parseJsonArray(current.tags_json);
+  const now = isoNow();
+
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE memos
+       SET is_deleted = 0, deleted_at = NULL, updated_at = ?
+       WHERE id = ? AND is_deleted = 1`
+    ).bind(now, id),
+    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
+    c.env.DB.prepare(
+      `INSERT INTO memos_fts (memo_id, title, content_text, tags)
+       VALUES (?, ?, ?, ?)`
+    ).bind(id, current.title, current.content_text, tags.join(" ")),
+    auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.restore", "memo", id, {}),
+  ]);
+
+  return c.json({ memo: await getMemoDetail(c.env.DB, id) });
 });
 
 app.post("/api/v1/memos/merge", zValidator("json", MergeMemosSchema), async (c) => {
@@ -708,7 +788,7 @@ app.post("/api/v1/memos/merge", zValidator("json", MergeMemosSchema), async (c) 
   const placeholders = uniqueMemoIds.map(() => "?").join(", ");
   const rows = await c.env.DB.prepare(
     `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-            m.is_archived, m.created_at, m.updated_at, c.revision,
+            m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
             c.content_json, c.content_markdown, c.content_text, c.content_hash,
             m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
      FROM memos m
@@ -777,6 +857,7 @@ app.post("/api/v1/memos/merge", zValidator("json", MergeMemosSchema), async (c) 
        SET is_deleted = 1, deleted_at = ?, merged_into_memo_id = ?, merged_at = ?, updated_at = ?
        WHERE id IN (${placeholders})`
     ).bind(now, newMemoId, now, now, ...uniqueMemoIds),
+    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds),
     c.env.DB.prepare(
       `UPDATE resources
        SET original_memo_id = COALESCE(original_memo_id, memo_id),
@@ -1141,9 +1222,11 @@ const mapMemoSummary = (row: MemoSummaryRow): MemoSummary => ({
   tags: parseJsonArray(row.tags_json),
   isPinned: Boolean(row.is_pinned),
   isArchived: Boolean(row.is_archived),
+  isDeleted: Boolean(row.is_deleted),
   revision: row.revision,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  deletedAt: row.deleted_at,
 });
 
 const mapMemoDetail = (row: MemoDetailRow): MemoDetail => ({
@@ -1199,22 +1282,26 @@ const getNotebook = async (db: D1Database, id: string): Promise<Notebook | null>
   return row ? mapNotebook(row) : null;
 };
 
-const getMemoDetailRow = async (db: D1Database, id: string): Promise<MemoDetailRow | null> =>
+const getMemoDetailRow = async (
+  db: D1Database,
+  id: string,
+  includeDeleted = false
+): Promise<MemoDetailRow | null> =>
   db
     .prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-              m.is_archived, m.created_at, m.updated_at, c.revision,
+              m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
               c.content_json, c.content_markdown, c.content_text, c.content_hash,
               m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
-       WHERE m.id = ? AND m.is_deleted = 0`
+       WHERE m.id = ? AND (? = 1 OR m.is_deleted = 0)`
     )
-    .bind(id)
+    .bind(id, includeDeleted ? 1 : 0)
     .first<MemoDetailRow>();
 
-const getMemoDetail = async (db: D1Database, id: string): Promise<MemoDetail | null> => {
-  const row = await getMemoDetailRow(db, id);
+const getMemoDetail = async (db: D1Database, id: string, includeDeleted = false): Promise<MemoDetail | null> => {
+  const row = await getMemoDetailRow(db, id, includeDeleted);
   return row ? mapMemoDetail(row) : null;
 };
 
@@ -1228,6 +1315,20 @@ const getResourceRow = async (db: D1Database, id: string): Promise<ResourceRow |
     )
     .bind(id)
     .first<ResourceRow>();
+
+const getResourceRowsForMemo = async (db: D1Database, memoId: string): Promise<ResourceRow[]> => {
+  const rows = await db
+    .prepare(
+      `SELECT id, memo_id, original_memo_id, bucket_name, object_key, kind, mime_type,
+              filename, byte_size, sha256, width, height, created_at, updated_at
+       FROM resources
+       WHERE memo_id = ?`
+    )
+    .bind(memoId)
+    .all<ResourceRow>();
+
+  return rows.results;
+};
 
 const parseJsonArray = (json: string): string[] => {
   try {
@@ -1301,9 +1402,14 @@ const clampNumber = (value: number, min: number, max: number) => {
 };
 
 const toFtsQuery = (value: string) => {
-  const tokens = value.match(/[\p{L}\p{N}_-]+/gu) ?? [];
-  return tokens.slice(0, 8).join(" ");
+  const tokens = value.match(/[\p{L}\p{N}_]+/gu) ?? [];
+  return tokens
+    .slice(0, 8)
+    .map((token) => `"${token.replace(/"/g, '""')}"`)
+    .join(" ");
 };
+
+const escapeLike = (value: string) => value.replace(/[\\%_]/g, (character) => `\\${character}`);
 
 const sha256 = async (value: string) => {
   const bytes = new TextEncoder().encode(value);

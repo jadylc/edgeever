@@ -20,9 +20,11 @@ export type MemoSummary = {
   tags: string[];
   isPinned: boolean;
   isArchived: boolean;
+  isDeleted: boolean;
   revision: number;
   createdAt: string;
   updatedAt: string;
+  deletedAt: string | null;
 };
 
 export type MemoDetail = MemoSummary & {
