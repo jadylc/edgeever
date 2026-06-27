@@ -829,14 +829,14 @@ export const EditorPane = ({
               </Button>
             </div>
             <button
-              className="flex h-8 min-w-0 max-w-[112px] items-center gap-1 rounded-md border border-transparent bg-transparent px-2 text-xs font-medium text-slate-700 outline-none transition hover:border-slate-200 hover:bg-slate-50 focus-visible:border-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-500/20 disabled:opacity-50 sm:hidden"
+              className="flex h-8 min-w-0 max-w-[112px] items-center gap-1 rounded-md border border-transparent bg-transparent px-2 text-xs font-medium text-slate-700 outline-none transition hover:border-slate-200 hover:bg-slate-50 focus-visible:border-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-500/20 disabled:opacity-50 sm:hidden whitespace-nowrap"
               type="button"
               disabled={readOnly || notebookUpdatePending}
               title="所在笔记本"
               aria-label={`所在笔记本：${currentNotebookLabel}`}
               onClick={() => setMobileNotebookSheetOpen(true)}
             >
-              <span className="min-w-0 truncate">{currentNotebookLabel}</span>
+              <span className="min-w-0 truncate whitespace-nowrap">{currentNotebookLabel}</span>
               <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
             </button>
 
@@ -846,7 +846,7 @@ export const EditorPane = ({
                 disabled={readOnly || notebookUpdatePending}
                 onValueChange={(value) => handleNotebookChange(value)}
               >
-                <SelectTrigger className="h-8 min-w-0 max-w-[260px] text-xs font-semibold text-slate-700 border-transparent bg-transparent hover:border-slate-200 hover:bg-slate-50">
+                <SelectTrigger className="h-8 min-w-0 max-w-[260px] text-xs font-semibold text-slate-700 border-transparent bg-transparent hover:border-slate-200 hover:bg-slate-50 whitespace-nowrap">
                   <SelectValue placeholder="所在笔记本" />
                 </SelectTrigger>
                 <SelectContent className="max-h-60 bg-white border border-slate-200 rounded-md py-1 shadow-md">
