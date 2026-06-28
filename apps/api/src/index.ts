@@ -38,6 +38,7 @@ import openApiSpec from "../../../docs/openapi.json";
 type Bindings = {
   DB: D1Database;
   RESOURCES: R2Bucket;
+  IMAGES?: ImagesBinding;
   EDGE_EVER_AUTH_USERNAME?: string;
   EDGE_EVER_AUTH_PASSWORD_HASH?: string;
   EDGE_EVER_SESSION_TTL_DAYS?: string;
@@ -53,6 +54,11 @@ type AuthContext = {
   scopes: string[];
   sessionId?: string;
   tokenId?: string;
+};
+
+type AuditActor = {
+  actorType: "user" | "agent";
+  actorId: string | null;
 };
 
 type NotebookRow = {
@@ -188,6 +194,10 @@ const SESSION_TOKEN_BYTES = 32;
 const DEFAULT_SESSION_TTL_DAYS = 30;
 const DEFAULT_R2_BUCKET_NAME = "edgeever-resources";
 const MAX_IMAGE_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_COMPRESSED_IMAGE_EDGE = 2560;
+const IMAGE_COMPRESSION_QUALITY = 82;
+const COMPRESSED_IMAGE_MIME_TYPE = "image/webp";
+const COMPRESSED_IMAGE_EXTENSION = ".webp";
 const REVISION_SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000;
 const API_TOKEN_BYTES = 32;
 const API_TOKEN_PREFIX = "eev";
@@ -209,6 +219,7 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   "image/webp",
   "image/avif",
 ]);
+const COMPRESSIBLE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
 
 const app = new Hono<{ Bindings: Bindings; Variables: { auth: AuthContext } }>();
 
@@ -923,48 +934,63 @@ app.post("/api/v1/memos/:id/resources", async (c) => {
     return badRequest(c, "Expected multipart form field named file.");
   }
 
-  const mimeType = file.type || "application/octet-stream";
-
-  if (!SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
-    return c.json(
-      {
-        error: {
-          code: "unsupported_media_type",
-          message: "Only PNG, JPEG, GIF, WebP and AVIF images are supported.",
-        },
-      },
-      415
-    );
-  }
-
-  if (file.size <= 0 || file.size > MAX_IMAGE_UPLOAD_BYTES) {
-    return c.json(
-      {
-        error: {
-          code: "upload_too_large",
-          message: "Image must be between 1 byte and 50 MB.",
-        },
-      },
-      413
-    );
-  }
-
   const actor = getAuditActor(c);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let resource: Resource;
+
+  try {
+    resource = await createImageResource(c, {
+      memoId,
+      filename: file.name,
+      mimeType: file.type || "application/octet-stream",
+      bytes,
+      actor,
+      source: "upload",
+    });
+  } catch (error) {
+    if (error instanceof AppError) {
+      return apiError(c, error.code, error.message, error.status);
+    }
+
+    throw error;
+  }
+
+  return c.json({ resource }, 201);
+});
+
+const createImageResource = async (
+  c: AppContext,
+  input: {
+    memoId: string;
+    filename: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    actor: AuditActor;
+    source: "upload" | "mcp";
+  }
+) => {
+  validateImageUpload(input.mimeType, input.bytes.byteLength);
+
   const resourceId = createId("res");
   const now = isoNow();
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const objectKey = `memos/${memoId}/${resourceId}${inferImageExtension(file.name, mimeType)}`;
+  const processed = await prepareImageForStorage(c.env.IMAGES, {
+    bytes: input.bytes,
+    filename: input.filename,
+    mimeType: input.mimeType,
+    source: input.source,
+  });
+  const objectKey = `memos/${input.memoId}/${resourceId}${inferImageExtension(processed.filename, processed.mimeType)}`;
   const bucketName = c.env.EDGE_EVER_R2_BUCKET_NAME?.trim() || DEFAULT_R2_BUCKET_NAME;
-  const filename = normalizeFilename(file.name) || `${resourceId}${inferImageExtension(file.name, mimeType)}`;
-  const checksum = await sha256Bytes(bytes);
+  const filename = normalizeFilename(processed.filename) || `${resourceId}${inferImageExtension(processed.filename, processed.mimeType)}`;
+  const checksum = await sha256Bytes(processed.bytes);
 
-  await c.env.RESOURCES.put(objectKey, bytes, {
+  await c.env.RESOURCES.put(objectKey, processed.bytes, {
     httpMetadata: {
-      contentType: mimeType,
+      contentType: processed.mimeType,
       cacheControl: "private, max-age=3600",
     },
     customMetadata: {
-      memoId,
+      memoId: input.memoId,
       resourceId,
       filename,
     },
@@ -975,25 +1001,28 @@ app.post("/api/v1/memos/:id/resources", async (c) => {
       c.env.DB.prepare(
         `INSERT INTO resources (
           id, memo_id, bucket_name, object_key, kind, mime_type, filename,
-          byte_size, sha256, metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)`
+          byte_size, sha256, width, height, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         resourceId,
-        memoId,
+        input.memoId,
         bucketName,
         objectKey,
-        mimeType,
+        processed.mimeType,
         filename,
-        file.size,
+        processed.bytes.byteLength,
         checksum,
-        JSON.stringify({ source: "paste" }),
+        processed.width,
+        processed.height,
+        JSON.stringify(processed.metadata),
         now,
         now
       ),
-      auditStatement(c.env.DB, actor.actorType, actor.actorId, "resource.create", "resource", resourceId, {
-        memoId,
-        mimeType,
-        byteSize: file.size,
+      auditStatement(c.env.DB, input.actor.actorType, input.actor.actorId, "resource.create", "resource", resourceId, {
+        memoId: input.memoId,
+        mimeType: processed.mimeType,
+        byteSize: processed.bytes.byteLength,
+        compressed: processed.compressed,
       }),
     ]);
   } catch (error) {
@@ -1004,11 +1033,156 @@ app.post("/api/v1/memos/:id/resources", async (c) => {
   const resource = await getResourceRow(c.env.DB, resourceId);
 
   if (!resource) {
-    return notFound(c, "Resource not found");
+    throw new AppError("not_found", "Resource not found", 404);
   }
 
-  return c.json({ resource: mapResource(resource) }, 201);
-});
+  return mapResource(resource);
+};
+
+const validateImageUpload = (mimeType: string, size: number) => {
+  if (!SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+    throw new AppError("unsupported_media_type", "Only PNG, JPEG, GIF, WebP and AVIF images are supported.", 415);
+  }
+
+  if (size <= 0 || size > MAX_IMAGE_UPLOAD_BYTES) {
+    throw new AppError("upload_too_large", "Image must be between 1 byte and 50 MB.", 413);
+  }
+};
+
+type PreparedImage = {
+  bytes: Uint8Array;
+  mimeType: string;
+  filename: string;
+  width: number | null;
+  height: number | null;
+  compressed: boolean;
+  metadata: Record<string, unknown>;
+};
+
+const prepareImageForStorage = async (
+  images: ImagesBinding | undefined,
+  input: { bytes: Uint8Array; filename: string; mimeType: string; source: "upload" | "mcp" }
+): Promise<PreparedImage> => {
+  const baseMetadata: Record<string, unknown> = {
+    source: input.source,
+    originalFilename: normalizeFilename(input.filename) || null,
+    originalMimeType: input.mimeType,
+    originalByteSize: input.bytes.byteLength,
+  };
+
+  if (!images) {
+    return {
+      bytes: input.bytes,
+      mimeType: input.mimeType,
+      filename: input.filename,
+      width: null,
+      height: null,
+      compressed: false,
+      metadata: {
+        ...baseMetadata,
+        compression: "unavailable",
+      },
+    };
+  }
+
+  let info: ImageInfoResponse | null = null;
+
+  try {
+    info = await images.info(bytesToStream(input.bytes));
+  } catch {
+    info = null;
+  }
+
+  const originalWidth = getPositiveInteger(info && "width" in info ? info.width : null);
+  const originalHeight = getPositiveInteger(info && "height" in info ? info.height : null);
+  const baseResult = {
+    bytes: input.bytes,
+    mimeType: input.mimeType,
+    filename: input.filename,
+    width: originalWidth,
+    height: originalHeight,
+    compressed: false,
+    metadata: {
+      ...baseMetadata,
+      width: originalWidth,
+      height: originalHeight,
+      compressed: false,
+    },
+  };
+
+  if (!COMPRESSIBLE_IMAGE_MIME_TYPES.has(input.mimeType)) {
+    return baseResult;
+  }
+
+  try {
+    const transform: ImageTransform = {};
+    const maxEdge = originalWidth && originalHeight ? Math.max(originalWidth, originalHeight) : null;
+
+    if (maxEdge && maxEdge > MAX_COMPRESSED_IMAGE_EDGE) {
+      const scale = MAX_COMPRESSED_IMAGE_EDGE / maxEdge;
+      transform.width = Math.max(1, Math.round((originalWidth ?? maxEdge) * scale));
+      transform.height = Math.max(1, Math.round((originalHeight ?? maxEdge) * scale));
+      transform.fit = "scale-down";
+    }
+
+    const result = await images
+      .input(bytesToStream(input.bytes))
+      .transform(transform)
+      .output({ format: COMPRESSED_IMAGE_MIME_TYPE, quality: IMAGE_COMPRESSION_QUALITY });
+    const response = result.response();
+    const contentType = result.contentType() || response.headers.get("Content-Type") || COMPRESSED_IMAGE_MIME_TYPE;
+    const compressedBytes = new Uint8Array(await response.arrayBuffer());
+
+    if (contentType !== COMPRESSED_IMAGE_MIME_TYPE || compressedBytes.byteLength >= input.bytes.byteLength) {
+      return baseResult;
+    }
+
+    return {
+      bytes: compressedBytes,
+      mimeType: COMPRESSED_IMAGE_MIME_TYPE,
+      filename: toCompressedFilename(input.filename),
+      width: transform.width ?? originalWidth,
+      height: transform.height ?? originalHeight,
+      compressed: true,
+      metadata: {
+        ...baseMetadata,
+        width: originalWidth,
+        height: originalHeight,
+        compressed: true,
+        compression: {
+          format: COMPRESSED_IMAGE_MIME_TYPE,
+          quality: IMAGE_COMPRESSION_QUALITY,
+          maxEdge: MAX_COMPRESSED_IMAGE_EDGE,
+          originalByteSize: input.bytes.byteLength,
+          byteSize: compressedBytes.byteLength,
+        },
+      },
+    };
+  } catch {
+    return baseResult;
+  }
+};
+
+const bytesToStream = (bytes: Uint8Array) =>
+  new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+
+const getPositiveInteger = (value: unknown) =>
+  typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+
+const toCompressedFilename = (filename: string) => {
+  const trimmed = filename.trim();
+
+  if (!trimmed) {
+    return `image${COMPRESSED_IMAGE_EXTENSION}`;
+  }
+
+  return trimmed.replace(/\.[^.]+$/, "") + COMPRESSED_IMAGE_EXTENSION;
+};
 
 app.get("/api/v1/resources/:id/blob", async (c) => {
   const denied = requireScopes(c, "read:resources");
@@ -1521,6 +1695,23 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: "upload_memo_image",
+    description:
+      "Upload a base64-encoded image resource to a memo. The server compresses supported images before storing them and returns Markdown that can be inserted into memo content.",
+    inputSchema: {
+      type: "object",
+      required: ["memoId", "mimeType", "dataBase64"],
+      additionalProperties: false,
+      properties: {
+        memoId: { type: "string" },
+        filename: { type: "string" },
+        mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"] },
+        dataBase64: { type: "string" },
+        alt: { type: "string" },
+      },
+    },
+  },
+  {
     name: "move_memos",
     description: "Move one or more active memos to another notebook.",
     inputSchema: {
@@ -1652,6 +1843,33 @@ const callMcpTool = async (
 
       return { memo: result.memo };
     }
+    case "upload_memo_image": {
+      assertScope(auth, "write:resources");
+      const memoId = getRequiredString(args.memoId, "memoId");
+      const memo = await getMemoDetail(c.env.DB, memoId);
+
+      if (!memo) {
+        throw new AppError("not_found", "Memo not found", 404);
+      }
+
+      const mimeType = getRequiredString(args.mimeType, "mimeType");
+      const filename = getOptionalString(args.filename) ?? `image${inferImageExtension("", mimeType)}`;
+      const bytes = decodeBase64ImageData(getRequiredString(args.dataBase64, "dataBase64"));
+      const resource = await createImageResource(c, {
+        memoId,
+        filename,
+        mimeType,
+        bytes,
+        actor: getAuditActor(c),
+        source: "mcp",
+      });
+      const alt = getOptionalString(args.alt) ?? normalizeFilename(filename) ?? "image";
+
+      return {
+        resource,
+        markdownImage: `![${escapeMarkdownImageAlt(alt)}](${resource.url})`,
+      };
+    }
     case "move_memos": {
       assertScope(auth, "write:memos");
       const notebookId = getRequiredString(args.notebookId, "notebookId");
@@ -1765,6 +1983,30 @@ const getRequiredStringArray = (value: unknown, name: string) => {
 
   return items;
 };
+
+const decodeBase64ImageData = (value: string) => {
+  const [, dataUrlPayload] = value.match(/^data:[^;]+;base64,(.+)$/i) ?? [];
+  const base64 = (dataUrlPayload ?? value).replace(/\s/g, "");
+
+  if (!base64) {
+    throw new AppError("invalid_params", "dataBase64 is required", 400);
+  }
+
+  try {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return bytes;
+  } catch {
+    throw new AppError("invalid_params", "dataBase64 must be valid base64 image data.", 400);
+  }
+};
+
+const escapeMarkdownImageAlt = (value: string) => value.replace(/[\\[\]]/g, "\\$&");
 
 const isAuthRequired = async (env: Bindings) => {
   if (env.EDGE_EVER_AUTH_PASSWORD_HASH?.trim()) {
