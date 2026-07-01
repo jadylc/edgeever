@@ -1694,6 +1694,20 @@ const MCP_TOOLS = [
     },
   },
   {
+    name: "list_memos",
+    description: "List active EdgeEver memos with pagination. Use includeContent when full Markdown is needed.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        notebookId: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+        offset: { type: "integer", minimum: 0 },
+        includeContent: { type: "boolean" },
+      },
+    },
+  },
+  {
     name: "get_memo",
     description: "Read a memo with Markdown content.",
     inputSchema: {
@@ -1850,6 +1864,15 @@ const callMcpTool = async (
           limit: clampNumber(Number(args.limit ?? 20), 1, 50),
         }),
       };
+    }
+    case "list_memos": {
+      assertScope(auth, "read:memos");
+      return await listMemosForMcp(c.env.DB, {
+        notebookId: getOptionalString(args.notebookId),
+        limit: clampNumber(Number(args.limit ?? 50), 1, 100),
+        offset: clampNumber(Number(args.offset ?? 0), 0, 100_000),
+        includeContent: args.includeContent === true,
+      });
     }
     case "get_memo": {
       assertScope(auth, "read:memos");
@@ -3082,6 +3105,66 @@ const searchMemoSummaries = async (
     .all<MemoSummaryRow>();
 
   return rows.results.map(mapMemoSummary);
+};
+
+const listMemosForMcp = async (
+  db: D1Database,
+  options: { notebookId?: string | null; limit: number; offset: number; includeContent: boolean }
+) => {
+  const notebookId = options.notebookId?.trim() || null;
+  const limit = clampNumber(options.limit, 1, 100);
+  const offset = clampNumber(options.offset, 0, 100_000);
+  const pageSize = limit + 1;
+
+  if (options.includeContent) {
+    const rows = await db
+      .prepare(
+        `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
+                m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
+                c.content_json, c.content_markdown, c.content_text, c.content_hash,
+                m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
+         FROM memos m
+         INNER JOIN memo_contents c ON c.memo_id = m.id
+         WHERE m.is_deleted = 0
+           AND (? IS NULL OR m.notebook_id = ?)
+         ORDER BY m.updated_at DESC, m.id ASC
+         LIMIT ? OFFSET ?`
+      )
+      .bind(notebookId, notebookId, pageSize, offset)
+      .all<MemoDetailRow>();
+    const page = rows.results.slice(0, limit).map(mapMemoDetail);
+
+    return {
+      memos: page,
+      limit,
+      offset,
+      nextOffset: rows.results.length > limit ? offset + limit : null,
+      hasMore: rows.results.length > limit,
+    };
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
+              m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision
+       FROM memos m
+       INNER JOIN memo_contents c ON c.memo_id = m.id
+       WHERE m.is_deleted = 0
+         AND (? IS NULL OR m.notebook_id = ?)
+       ORDER BY m.updated_at DESC, m.id ASC
+       LIMIT ? OFFSET ?`
+    )
+    .bind(notebookId, notebookId, pageSize, offset)
+    .all<MemoSummaryRow>();
+  const page = rows.results.slice(0, limit).map(mapMemoSummary);
+
+  return {
+    memos: page,
+    limit,
+    offset,
+    nextOffset: rows.results.length > limit ? offset + limit : null,
+    hasMore: rows.results.length > limit,
+  };
 };
 
 const getNotebook = async (db: D1Database, id: string): Promise<Notebook | null> => {
