@@ -442,6 +442,9 @@ export const EditorPane = ({
   const draftPersistTimerRef = useRef<number | null>(null);
   const pendingBackAfterSaveRef = useRef(false);
   const toolbarRefreshFrameRef = useRef<number | null>(null);
+  const draftTitleRef = useRef("");
+  const draftTagsTextRef = useRef("");
+  const saveStateRef = useRef<"idle" | "saving" | "saved" | "queued" | "error" | "conflict">("idle");
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(MOBILE_EDITOR_QUERY);
@@ -652,6 +655,10 @@ export const EditorPane = ({
   }, [imageCompressionEnabled]);
 
   useEffect(() => {
+    saveStateRef.current = saveState;
+  }, [saveState]);
+
+  useEffect(() => {
     editorRef.current = editor;
     return () => {
       if (editorRef.current === editor) {
@@ -806,6 +813,9 @@ export const EditorPane = ({
         return;
       }
 
+      draftTitleRef.current = nextTitle;
+      draftTagsTextRef.current = nextTagsText;
+
       const writeDraft = () => {
         const latestMemo = memoRef.current;
         const latestEditor = editorRef.current;
@@ -816,21 +826,21 @@ export const EditorPane = ({
 
         void localDb.drafts.put({
           memoId: latestMemo.id,
-          title: nextTitle,
-          tagsText: nextTagsText,
+          title: draftTitleRef.current,
+          tagsText: draftTagsTextRef.current,
           contentJson: latestEditor.getJSON() as TiptapDoc,
           updatedAt: new Date().toISOString(),
         });
       };
 
       if (draftPersistTimerRef.current !== null) {
-        window.clearTimeout(draftPersistTimerRef.current);
+        return;
       }
 
       draftPersistTimerRef.current = window.setTimeout(() => {
         draftPersistTimerRef.current = null;
         writeDraft();
-      }, 350);
+      }, 1500);
     },
     [tagsText, title]
   );
@@ -850,7 +860,10 @@ export const EditorPane = ({
       setDirtyVersion((version) => version + 1);
     }
 
-    setSaveState((current) => (current === "conflict" ? current : "idle"));
+    if (saveStateRef.current !== "idle") {
+      saveStateRef.current = "idle";
+      setSaveState("idle");
+    }
   }, [noteSearchOpen, noteSearchQuery]);
 
   const currentSnapshot = useCallback(() => {
