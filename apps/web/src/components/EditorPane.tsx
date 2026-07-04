@@ -439,29 +439,7 @@ const MobileNotebookSelectSheet = ({
   );
 };
 
-export const EditorPane = ({
-  memo,
-  mobileDefaultEditMemoId,
-  preserveUnsavedContentFromMemoId: _preserveUnsavedContentFromMemoId,
-  saveBlocked: _saveBlocked = false,
-  isTrashView,
-  notebooks,
-  isLoading,
-  imageCompressionEnabled,
-  hasNextMemo,
-  hasPreviousMemo,
-  onBackToList,
-  onOpenNextMemo,
-  onOpenPreviousMemo,
-  onSaved,
-  onDeleted,
-  onPermanentDeleted,
-  onRestored,
-  onMobileDefaultEditConsumed,
-  searchFocusToken,
-  replaceFocusToken,
-  selectionActionBar,
-}: {
+type EditorPaneProps = {
   memo: MemoDetail | null;
   mobileDefaultEditMemoId: string | null;
   preserveUnsavedContentFromMemoId?: string | null;
@@ -483,7 +461,550 @@ export const EditorPane = ({
   searchFocusToken: number;
   replaceFocusToken: number;
   selectionActionBar?: ReactNode;
-}) => {
+};
+
+type RichEditorPaneProps = EditorPaneProps & {
+  onRequestMobileNativeEdit?: () => void;
+};
+
+const MobileNativeEditorPane = ({
+  memo,
+  notebooks,
+  isTrashView,
+  onBackToList,
+  onSaved,
+  onMobileDefaultEditConsumed,
+  onExitMobileNativeEdit,
+}: EditorPaneProps & { onExitMobileNativeEdit: () => void }) => {
+  const titleRef = useRef<HTMLInputElement | null>(null);
+  const tagsRef = useRef<HTMLInputElement | null>(null);
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const draftTimerRef = useRef<number | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
+  const memoRef = useRef<MemoDetail | null>(memo);
+  const editingMemoIdRef = useRef<string | null>(memo?.id ?? null);
+  const hasUnsavedChangesRef = useRef(false);
+  const hydratingRef = useRef(false);
+  const savingRef = useRef(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "queued" | "error" | "conflict">("idle");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [notebookUpdatePending, setNotebookUpdatePending] = useState(false);
+  const [mobileNotebookSheetOpen, setMobileNotebookSheetOpen] = useState(false);
+  const notebookOptions = useMemo(() => getNotebookMoveOptions(notebooks), [notebooks]);
+  const readOnly = isTrashView || Boolean(memo?.isDeleted);
+  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? "笔记本";
+
+  const getTitleValue = useCallback(() => titleRef.current?.value ?? "", []);
+  const getTagsValue = useCallback(() => tagsRef.current?.value ?? "", []);
+  const getBodyValue = useCallback(() => bodyRef.current?.value ?? "", []);
+
+  const clearTimers = useCallback(() => {
+    if (draftTimerRef.current !== null) {
+      window.clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+  }, []);
+
+  const persistDraft = useCallback(() => {
+    const currentMemo = memoRef.current;
+    if (!currentMemo || currentMemo.isDeleted) {
+      return;
+    }
+
+    void localDb.drafts.put({
+      memoId: currentMemo.id,
+      title: getTitleValue(),
+      tagsText: getTagsValue(),
+      contentJson: markdownToDoc(getBodyValue()),
+      updatedAt: new Date().toISOString(),
+    });
+  }, [getBodyValue, getTagsValue, getTitleValue]);
+
+  const currentSnapshot = useCallback(() => {
+    const currentMemo = memoRef.current;
+    if (!currentMemo) {
+      return null;
+    }
+
+    return JSON.stringify({
+      memoId: currentMemo.id,
+      title: getTitleValue(),
+      tagsText: getTagsValue(),
+      body: getBodyValue(),
+    });
+  }, [getBodyValue, getTagsValue, getTitleValue]);
+
+  const saveCurrent = useCallback(async () => {
+    const currentMemo = memoRef.current;
+    const snapshot = currentSnapshot();
+
+    if (!currentMemo || currentMemo.isDeleted || !snapshot || savingRef.current) {
+      return false;
+    }
+
+    clearTimers();
+    savingRef.current = true;
+    setSaveState("saving");
+
+    const contentJson = markdownToDoc(getBodyValue());
+    const payload: MemoUpdateSyncPayload = {
+      memoId: currentMemo.id,
+      expectedRevision: currentMemo.revision,
+      title: getTitleValue(),
+      contentJson,
+      tags: parseTagsText(getTagsValue()),
+    };
+
+    try {
+      const data = await api.updateMemo(currentMemo.id, {
+        expectedRevision: payload.expectedRevision,
+        title: payload.title,
+        contentJson: payload.contentJson,
+        tags: payload.tags,
+      });
+
+      memoRef.current = data.memo;
+      await onSaved(data.memo);
+
+      if (currentSnapshot() === snapshot) {
+        hasUnsavedChangesRef.current = false;
+        setHasUnsavedChanges(false);
+        await localDb.drafts.delete(data.memo.id);
+        setSaveState("saved");
+        window.setTimeout(() => setSaveState("idle"), 1200);
+      } else {
+        persistDraft();
+        hasUnsavedChangesRef.current = true;
+        setHasUnsavedChanges(true);
+        setSaveState("idle");
+      }
+
+      return true;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : null;
+
+      if (code === "revision_conflict") {
+        setSaveState("conflict");
+        return false;
+      }
+
+      if (shouldQueueMemoSaveError(error)) {
+        await queueMemoUpdate(payload);
+        await localDb.drafts.put({
+          memoId: payload.memoId,
+          title: payload.title,
+          tagsText: getTagsValue(),
+          contentJson: payload.contentJson,
+          updatedAt: new Date().toISOString(),
+        });
+        hasUnsavedChangesRef.current = false;
+        setHasUnsavedChanges(false);
+        setSaveState("queued");
+        return true;
+      }
+
+      setSaveState("error");
+      return false;
+    } finally {
+      savingRef.current = false;
+    }
+  }, [clearTimers, currentSnapshot, getBodyValue, getTagsValue, getTitleValue, onSaved, persistDraft]);
+
+  const markDirty = useCallback(() => {
+    const currentMemo = memoRef.current;
+    if (hydratingRef.current || currentMemo?.isDeleted) {
+      return;
+    }
+
+    if (!hasUnsavedChangesRef.current) {
+      hasUnsavedChangesRef.current = true;
+      setHasUnsavedChanges(true);
+    }
+    setSaveState((current) => (current === "conflict" ? current : "idle"));
+
+    if (draftTimerRef.current !== null) {
+      window.clearTimeout(draftTimerRef.current);
+    }
+    draftTimerRef.current = window.setTimeout(() => {
+      draftTimerRef.current = null;
+      persistDraft();
+    }, MOBILE_DRAFT_PERSIST_DELAY_MS);
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      if (hasUnsavedChangesRef.current) {
+        void saveCurrent();
+      }
+    }, EDITOR_AUTO_SAVE_DELAY_MS);
+  }, [persistDraft, saveCurrent]);
+
+  useEffect(() => {
+    document.documentElement.classList.add("edgeever-mobile-native-editing");
+    document.body.classList.add("edgeever-mobile-native-editing");
+
+    return () => {
+      document.documentElement.classList.remove("edgeever-mobile-native-editing");
+      document.body.classList.remove("edgeever-mobile-native-editing");
+    };
+  }, []);
+
+  useEffect(() => () => clearTimers(), [clearTimers]);
+
+  useEffect(() => {
+    const element = bodyRef.current;
+    if (!element) {
+      return;
+    }
+
+    element.addEventListener("input", markDirty);
+    return () => element.removeEventListener("input", markDirty);
+  }, [markDirty]);
+
+  useEffect(() => {
+    if (!memo) {
+      memoRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    const sameMemo = editingMemoIdRef.current === memo.id;
+    memoRef.current = memo;
+
+    if (sameMemo && hasUnsavedChangesRef.current && !memo.isDeleted) {
+      return;
+    }
+
+    void (async () => {
+      const [draft, queuedUpdate] = memo.isDeleted
+        ? [null, null]
+        : await Promise.all([
+            localDb.drafts.get(memo.id),
+            localDb.syncQueue.get(getMemoUpdateQueueId(memo.id)),
+          ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      const draftUpdatedAt = draft ? Date.parse(draft.updatedAt) : 0;
+      const remoteUpdatedAt = Date.parse(memo.updatedAt);
+      const useDraft = Boolean(draft && (queuedUpdate || draftUpdatedAt >= remoteUpdatedAt));
+      const nextTitle = useDraft && draft ? draft.title : memo.title ?? "";
+      const nextTagsText = useDraft && draft ? draft.tagsText : memo.tags.join(", ");
+      const nextContent = useDraft && draft ? draft.contentJson : memo.contentJson;
+
+      hydratingRef.current = true;
+      editingMemoIdRef.current = memo.id;
+      if (titleRef.current) {
+        titleRef.current.value = nextTitle;
+      }
+      if (tagsRef.current) {
+        tagsRef.current.value = nextTagsText;
+      }
+      if (bodyRef.current) {
+        bodyRef.current.value = docToMarkdown(nextContent);
+      }
+      hasUnsavedChangesRef.current = Boolean(useDraft && !queuedUpdate);
+      setHasUnsavedChanges(hasUnsavedChangesRef.current);
+      setSaveState(queuedUpdate ? syncStatusToSaveState(queuedUpdate.status) : "idle");
+      window.setTimeout(() => {
+        hydratingRef.current = false;
+        bodyRef.current?.focus({ preventScroll: true });
+      }, 0);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [memo]);
+
+  useEffect(() => {
+    const persistBeforeSuspend = () => {
+      if (hasUnsavedChangesRef.current) {
+        persistDraft();
+      }
+    };
+    const persistWhenHidden = () => {
+      if (document.visibilityState === "hidden") {
+        persistBeforeSuspend();
+      }
+    };
+
+    window.addEventListener("pagehide", persistBeforeSuspend);
+    document.addEventListener("visibilitychange", persistWhenHidden);
+
+    return () => {
+      window.removeEventListener("pagehide", persistBeforeSuspend);
+      document.removeEventListener("visibilitychange", persistWhenHidden);
+    };
+  }, [persistDraft]);
+
+  const finishEditing = async (goBack: boolean) => {
+    if (!readOnly && hasUnsavedChangesRef.current) {
+      const saved = await saveCurrent();
+      if (!saved && saveState !== "queued") {
+        return;
+      }
+    }
+
+    onMobileDefaultEditConsumed();
+    onExitMobileNativeEdit();
+    if (goBack) {
+      onBackToList();
+    }
+  };
+
+  const updateMemoNotebook = (notebookId: string, sourceMemo: MemoDetail = memoRef.current ?? memo!) => {
+    if (readOnly || !sourceMemo || notebookId === sourceMemo.notebookId || notebookUpdatePending) {
+      setMobileNotebookSheetOpen(false);
+      return;
+    }
+
+    setNotebookUpdatePending(true);
+    setSaveState("saving");
+
+    void api
+      .updateMemo(sourceMemo.id, {
+        expectedRevision: sourceMemo.revision,
+        notebookId,
+      })
+      .then(async (data) => {
+        memoRef.current = data.memo;
+        await onSaved(data.memo);
+        setSaveState("saved");
+        window.setTimeout(() => setSaveState("idle"), 1200);
+      })
+      .catch(() => setSaveState("error"))
+      .finally(() => {
+        setNotebookUpdatePending(false);
+        setMobileNotebookSheetOpen(false);
+      });
+  };
+
+  const handleNotebookChange = (notebookId: string) => {
+    if (!hasUnsavedChangesRef.current) {
+      updateMemoNotebook(notebookId);
+      return;
+    }
+
+    void saveCurrent().then((saved) => {
+      if (saved) {
+        updateMemoNotebook(notebookId);
+      }
+    });
+  };
+
+  const saveLabel =
+    saveState === "saving"
+      ? "保存中"
+      : saveState === "saved"
+        ? "已保存"
+        : saveState === "queued"
+          ? "待同步"
+          : saveState === "conflict"
+            ? "有冲突"
+            : saveState === "error"
+              ? "保存失败"
+              : hasUnsavedChanges
+                ? "未保存"
+                : "已保存";
+
+  const saveStateClassName =
+    saveState === "error" || saveState === "conflict"
+      ? "bg-rose-50 text-rose-700"
+      : saveState === "queued"
+        ? "bg-amber-50 text-amber-700"
+        : saveState === "saving" || hasUnsavedChanges
+          ? "bg-emerald-50 text-emerald-700"
+          : "bg-slate-100 text-slate-500";
+
+  if (!memo) {
+    return (
+      <div className="fixed inset-0 z-[90] flex items-center justify-center bg-white text-sm text-slate-500 sm:hidden">
+        加载中
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-[90] overflow-y-auto bg-white text-slate-950 sm:hidden" data-edgeever-mobile-native-editor>
+      <header className="flex min-h-12 items-center justify-between gap-2 border-b border-slate-100 bg-white px-3 py-2">
+        <Button
+          size="icon"
+          variant="ghost"
+          title={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
+          aria-label={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
+          disabled={savingRef.current || notebookUpdatePending}
+          onClick={() => void finishEditing(true)}
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        <div className="flex min-w-0 flex-1 justify-end gap-2">
+          <span className={cn("inline-flex max-w-[5.5rem] truncate rounded-full px-2 py-1 text-[11px] font-medium", saveStateClassName)}>
+            {saveLabel}
+          </span>
+          <button
+            className="inline-flex h-8 items-center justify-center rounded-full bg-slate-950 px-3 text-xs font-semibold text-white disabled:bg-slate-200 disabled:text-slate-500"
+            type="button"
+            disabled={savingRef.current || notebookUpdatePending}
+            onClick={() => void finishEditing(false)}
+          >
+            {saveState === "saving" ? "保存中" : "完成"}
+          </button>
+        </div>
+      </header>
+
+      <main className="bg-white">
+        <div className="space-y-3 px-4 pb-4 pt-4">
+          <input
+            ref={titleRef}
+            defaultValue={memo.title ?? ""}
+            readOnly={readOnly}
+            onInput={markDirty}
+            className="block w-full border-0 bg-transparent text-2xl font-bold leading-tight text-slate-950 outline-none placeholder:text-slate-300"
+            placeholder={DEFAULT_MEMO_TITLE}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md border border-transparent bg-transparent px-2 text-sm font-medium text-slate-600 outline-none disabled:opacity-50"
+              type="button"
+              disabled={readOnly || notebookUpdatePending}
+              title="所在笔记本"
+              aria-label={`所在笔记本：${currentNotebookLabel}`}
+              onClick={() => setMobileNotebookSheetOpen(true)}
+            >
+              <span className="min-w-0 truncate">{currentNotebookLabel}</span>
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+            </button>
+            <label className="flex h-8 min-w-[12rem] flex-1 items-center gap-2 rounded-md border border-transparent px-2 text-sm text-slate-500">
+              <Tags className="h-4 w-4" />
+              <input
+                ref={tagsRef}
+                defaultValue={memo.tags.join(", ")}
+                readOnly={readOnly}
+                onInput={markDirty}
+                className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
+                placeholder="添加标签，用逗号分隔"
+              />
+            </label>
+          </div>
+        </div>
+
+        <textarea
+          ref={bodyRef}
+          defaultValue={docToMarkdown(memo.contentJson)}
+          autoCapitalize="sentences"
+          autoComplete="on"
+          autoCorrect="on"
+          enterKeyHint="enter"
+          inputMode="text"
+          name="memo-body-native"
+          spellCheck
+          readOnly={readOnly}
+          aria-label="笔记正文"
+          placeholder="开始记录..."
+          className="block min-h-[70dvh] w-full resize-none border-0 bg-white px-4 py-4 text-base leading-7 text-slate-900 outline-none placeholder:text-slate-400"
+          style={{ WebkitUserSelect: "text", userSelect: "text", caretColor: "auto" }}
+        />
+      </main>
+
+      {mobileNotebookSheetOpen && (
+        <MobileNotebookSelectSheet
+          isUpdating={notebookUpdatePending || saveState === "saving"}
+          options={notebookOptions}
+          selectedNotebookId={memo.notebookId}
+          onClose={() => setMobileNotebookSheetOpen(false)}
+          onSelect={handleNotebookChange}
+        />
+      )}
+    </div>
+  );
+};
+
+export const EditorPane = (props: EditorPaneProps) => {
+  const [isMobileViewport, setIsMobileViewport] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia(MOBILE_EDITOR_QUERY).matches
+  );
+  const [mobileNativeEditMemoId, setMobileNativeEditMemoId] = useState<string | null>(null);
+  const readOnly = props.isTrashView || Boolean(props.memo?.isDeleted);
+  const mobileDefaultEditRequested = Boolean(
+    props.memo?.id && props.memo.id === props.mobileDefaultEditMemoId && !readOnly
+  );
+  const mobileNativeEditingActive = Boolean(
+    isMobileViewport &&
+      props.memo &&
+      !readOnly &&
+      (mobileDefaultEditRequested || mobileNativeEditMemoId === props.memo.id)
+  );
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(MOBILE_EDITOR_QUERY);
+    const updateMobileViewport = () => setIsMobileViewport(mediaQuery.matches);
+
+    updateMobileViewport();
+    mediaQuery.addEventListener("change", updateMobileViewport);
+
+    return () => mediaQuery.removeEventListener("change", updateMobileViewport);
+  }, []);
+
+  useEffect(() => {
+    setMobileNativeEditMemoId(null);
+  }, [props.memo?.id]);
+
+  if (mobileNativeEditingActive) {
+    return (
+      <MobileNativeEditorPane
+        {...props}
+        onExitMobileNativeEdit={() => setMobileNativeEditMemoId(null)}
+      />
+    );
+  }
+
+  return (
+    <RichEditorPane
+      {...props}
+      mobileDefaultEditMemoId={null}
+      onRequestMobileNativeEdit={() => {
+        if (props.memo?.id && !readOnly) {
+          setMobileNativeEditMemoId(props.memo.id);
+        }
+      }}
+    />
+  );
+};
+
+const RichEditorPane = ({
+  memo,
+  mobileDefaultEditMemoId,
+  preserveUnsavedContentFromMemoId: _preserveUnsavedContentFromMemoId,
+  saveBlocked: _saveBlocked = false,
+  isTrashView,
+  notebooks,
+  isLoading,
+  imageCompressionEnabled,
+  hasNextMemo,
+  hasPreviousMemo,
+  onBackToList,
+  onOpenNextMemo,
+  onOpenPreviousMemo,
+  onSaved,
+  onDeleted,
+  onPermanentDeleted,
+  onRestored,
+  onMobileDefaultEditConsumed,
+  searchFocusToken,
+  replaceFocusToken,
+  selectionActionBar,
+  onRequestMobileNativeEdit,
+}: RichEditorPaneProps) => {
   const queryClient = useQueryClient();
   const isSelectionMode = Boolean(selectionActionBar);
   const [title, setTitle] = useState("");
@@ -2068,6 +2589,10 @@ export const EditorPane = ({
           title="编辑笔记"
           aria-label="编辑笔记"
           onClick={() => {
+            if (onRequestMobileNativeEdit) {
+              onRequestMobileNativeEdit();
+              return;
+            }
             setIsMobileEditing(true);
             window.requestAnimationFrame(() => focusMobileInputTarget());
           }}

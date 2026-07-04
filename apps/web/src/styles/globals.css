@@ -73,6 +73,13 @@ body,
   overflow: hidden;
 }
 
+html.edgeever-mobile-native-editing,
+html.edgeever-mobile-native-editing body,
+html.edgeever-mobile-native-editing #root {
+  min-height: 100%;
+  overflow: auto;
+}
+
 body {
   margin: 0;
   background:
