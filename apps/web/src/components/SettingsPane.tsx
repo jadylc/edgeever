@@ -7,6 +7,7 @@ import { EvernoteImportGuideCard } from "./settings/EvernoteImportGuideCard";
 import { McpConfigCard } from "./settings/McpConfigCard";
 import { PreferenceCard } from "./settings/PreferenceCard";
 import { SessionCard } from "./settings/SessionCard";
+import { SystemInfoCard } from "./settings/SystemInfoCard";
 
 interface SettingsPaneProps {
   onClose: () => void;
@@ -67,6 +68,7 @@ export const SettingsPane = ({
           />
           <AdvancedPlayCard />
           <EvernoteImportGuideCard onShowGuide={onShowGuide} />
+          <SystemInfoCard />
           <McpConfigCard />
           <SessionCard authRequired={authRequired} isLoggingOut={isLoggingOut} onLogout={onLogout} />
         </div>

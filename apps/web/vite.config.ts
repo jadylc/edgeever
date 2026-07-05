@@ -1,8 +1,21 @@
 import react from "@vitejs/plugin-react";
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+
+const readPackageVersion = () => {
+  try {
+    const packagePath = fileURLToPath(new URL("../../package.json", import.meta.url));
+    const packageJson = JSON.parse(readFileSync(packagePath, "utf8")) as {
+      version?: string;
+    };
+    return packageJson.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+};
 
 const readGitCommit = () => {
   try {
@@ -13,10 +26,12 @@ const readGitCommit = () => {
 };
 
 const buildId = process.env.CF_PAGES_COMMIT_SHA?.slice(0, 12) ?? process.env.GITHUB_SHA?.slice(0, 12) ?? readGitCommit() ?? "local";
+const appVersion = readPackageVersion();
 
 export default defineConfig({
   root: "apps/web",
   define: {
+    __EDGEEVER_APP_VERSION__: JSON.stringify(appVersion),
     __EDGEEVER_BUILD_ID__: JSON.stringify(buildId),
     __EDGEEVER_BUILD_LABEL__: JSON.stringify(buildId === "local" ? "local" : buildId.slice(0, 7)),
   },
