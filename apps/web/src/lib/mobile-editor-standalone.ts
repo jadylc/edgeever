@@ -1,4 +1,5 @@
 import { emptyDoc, markdownToDoc, type MemoDetail, type Resource, type TiptapDoc } from "@edgeever/shared";
+import { ApiRequestError } from "@/lib/api";
 
 export const MOBILE_EDITOR_AUTO_SAVE_DELAY_MS = 1200;
 export const MOBILE_EDITOR_LEAVE_SAVE_TIMEOUT_MS = 1600;
@@ -15,6 +16,7 @@ export type MobileEditorResourceResponse = {
 };
 
 export type MobileEditorDraft = {
+  expectedRevision?: number;
   title: string;
   tagsText: string;
   contentJson: TiptapDoc;
@@ -91,11 +93,12 @@ export const requestMobileEditorJson = async <T,>(path: string, init?: RequestIn
 
   if (!response.ok) {
     const body = await response.json().catch(() => null);
+    const error = body && typeof body === "object" && "error" in body ? (body as { error?: { code?: string; message?: string } }).error : undefined;
     const message =
       body && typeof body === "object" && "error" in body
-        ? (body as { error?: { message?: string } }).error?.message
+        ? error?.message
         : response.statusText;
-    throw new Error(message || "Request failed");
+    throw new ApiRequestError(message || "Request failed", response.status, error?.code);
   }
 
   return response.json() as Promise<T>;

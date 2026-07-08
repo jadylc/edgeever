@@ -13,6 +13,7 @@ import {
 } from "@/components/MobileStandaloneEditorParts";
 import { getNotebookMoveOptions } from "@/lib/app-helpers";
 import { compressImageForUpload } from "@/lib/image-compression";
+import { localDb, type LocalDraft } from "@/lib/local-db";
 import {
   DEFAULT_MOBILE_EDITOR_MEMO_TITLE,
   MOBILE_EDITOR_AUTO_SAVE_DELAY_MS,
@@ -31,6 +32,7 @@ import {
   type MobileEditorMemoResponse,
   type MobileEditorSaveState,
 } from "@/lib/mobile-editor-standalone";
+import { getMemoUpdateQueueId, queueMemoUpdate, shouldQueueMemoSaveError, syncQueuedChanges } from "@/lib/sync-queue";
 
 type ListNotebooksResponse = {
   notebooks: Notebook[];
@@ -99,13 +101,35 @@ export const MobileStandaloneTiptapEditor = ({
       return;
     }
 
+    const currentMemo = memoRef.current;
     const draft: MobileEditorDraft = {
+      expectedRevision: currentMemo?.revision,
       title: titleRef.current,
       tagsText: tagsTextRef.current,
       contentJson: contentJsonRef.current,
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(draftKey, JSON.stringify(draft));
+
+    if (!currentMemo || currentMemo.isDeleted) {
+      return;
+    }
+
+    void localDb.drafts.put({
+      memoId: currentMemo.id,
+      expectedRevision: currentMemo.revision,
+      title: draft.title,
+      tagsText: draft.tagsText,
+      contentJson: draft.contentJson,
+      updatedAt: draft.updatedAt,
+    });
+    void queueMemoUpdate({
+      memoId: currentMemo.id,
+      expectedRevision: currentMemo.revision,
+      title: draft.title,
+      contentJson: draft.contentJson,
+      tags: parseMobileEditorTags(draft.tagsText),
+    });
   }, [draftKey]);
 
   const readLocalDraft = useCallback((): MobileEditorDraft | null => {
@@ -120,6 +144,28 @@ export const MobileStandaloneTiptapEditor = ({
       return null;
     }
   }, [draftKey]);
+
+  const readBestLocalDraft = useCallback(async (): Promise<MobileEditorDraft | null> => {
+    const browserDraft = readLocalDraft();
+    const persistedDraft = memoId ? await localDb.drafts.get(memoId).catch(() => null) : null;
+    const drafts = [browserDraft, persistedDraft].filter(Boolean) as Array<MobileEditorDraft | LocalDraft>;
+
+    if (drafts.length === 0) {
+      return null;
+    }
+
+    const latest = drafts.reduce((current, candidate) =>
+      Date.parse(candidate.updatedAt || "") > Date.parse(current.updatedAt || "") ? candidate : current
+    );
+
+    return {
+      expectedRevision: latest.expectedRevision,
+      title: latest.title,
+      tagsText: latest.tagsText,
+      contentJson: latest.contentJson,
+      updatedAt: latest.updatedAt,
+    };
+  }, [memoId, readLocalDraft]);
 
   const editor = useEditor({
     extensions: [
@@ -241,6 +287,10 @@ export const MobileStandaloneTiptapEditor = ({
         if (draftKey) {
           localStorage.removeItem(draftKey);
         }
+        await Promise.all([
+          localDb.drafts.delete(data.memo.id),
+          localDb.syncQueue.delete(getMemoUpdateQueueId(data.memo.id)),
+        ]);
         setSaveStateStable("saved");
         window.setTimeout(() => {
           if (!dirtyRef.current && !savingRef.current && !leavingRef.current) {
@@ -254,6 +304,12 @@ export const MobileStandaloneTiptapEditor = ({
         return await currentSavePromiseRef.current;
       } catch (saveError) {
         persistLocalDraft();
+        if (shouldQueueMemoSaveError(saveError)) {
+          setError(null);
+          setSaveStateStable("local-draft");
+          return true;
+        }
+
         setError(saveError instanceof Error ? saveError.message : "保存失败，已保留本地草稿");
         setSaveStateStable("error");
         return false;
@@ -466,8 +522,9 @@ export const MobileStandaloneTiptapEditor = ({
         const nextTitle = data.memo.title || "";
         const nextTagsText = Array.isArray(data.memo.tags) ? data.memo.tags.join(", ") : "";
         const nextContentJson = normalizeMobileEditorDoc(data.memo);
-        const draft = readLocalDraft();
-        const useDraft = Boolean(draft && Date.parse(draft.updatedAt || "") >= Date.parse(data.memo.updatedAt || ""));
+        const draft = await readBestLocalDraft();
+        const queuedUpdate = await localDb.syncQueue.get(getMemoUpdateQueueId(data.memo.id));
+        const useDraft = Boolean(draft && (queuedUpdate || Date.parse(draft.updatedAt || "") >= Date.parse(data.memo.updatedAt || "")));
 
         setMemo(data.memo);
 
@@ -514,7 +571,7 @@ export const MobileStandaloneTiptapEditor = ({
         initialFocusTimerRef.current = null;
       }
     };
-  }, [editor, focusEditorAfterLoad, memoId, readLocalDraft, scheduleMetadataSave, setSaveStateStable]);
+  }, [editor, focusEditorAfterLoad, memoId, readBestLocalDraft, scheduleMetadataSave, setSaveStateStable]);
 
   useEffect(() => {
     window.history.replaceState({ edgeeverMobileEditor: true }, "");
@@ -533,16 +590,56 @@ export const MobileStandaloneTiptapEditor = ({
       if (document.visibilityState === "hidden" && dirtyRef.current) {
         persistLocalDraft();
         void saveNow({ keepalive: true });
+        return;
       }
+
+      if (document.visibilityState === "visible") {
+        void syncQueuedChanges({
+          onSynced: (syncedMemo) => {
+            if (syncedMemo.id !== memoRef.current?.id) {
+              return;
+            }
+
+            memoRef.current = syncedMemo;
+            setMemo(syncedMemo);
+            lastSavedSnapshotRef.current = currentSnapshot();
+            dirtyRef.current = false;
+            if (draftKey) {
+              localStorage.removeItem(draftKey);
+            }
+            setSaveStateStable("saved");
+          },
+        });
+      }
+    };
+    const handleOnline = () => {
+      void syncQueuedChanges({
+        onSynced: (syncedMemo) => {
+          if (syncedMemo.id !== memoRef.current?.id) {
+            return;
+          }
+
+          memoRef.current = syncedMemo;
+          setMemo(syncedMemo);
+          lastSavedSnapshotRef.current = currentSnapshot();
+          dirtyRef.current = false;
+          if (draftKey) {
+            localStorage.removeItem(draftKey);
+          }
+          setSaveStateStable("saved");
+        },
+      });
     };
 
     window.addEventListener("popstate", handlePopState);
     window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       window.removeEventListener("popstate", handlePopState);
       window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
@@ -551,7 +648,7 @@ export const MobileStandaloneTiptapEditor = ({
         window.clearTimeout(initialFocusTimerRef.current);
       }
     };
-  }, [leavePage, persistLocalDraft, saveNow]);
+  }, [currentSnapshot, draftKey, leavePage, persistLocalDraft, saveNow, setSaveStateStable]);
 
   const saveLabel = getMobileEditorSaveLabel(saveState);
   const statusClassName = getMobileEditorStatusClassName(saveState);
