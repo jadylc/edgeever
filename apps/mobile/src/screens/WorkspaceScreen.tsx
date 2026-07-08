@@ -15,6 +15,8 @@ import {
   Code,
   Copy,
   ExternalLink,
+  FileArchive,
+  FileSpreadsheet,
   FileText,
   Folder,
   Grid,
@@ -32,6 +34,7 @@ import {
   Merge,
   Minus,
   MoreHorizontal,
+  Music,
   Pencil,
   Pin,
   Plus,
@@ -46,6 +49,7 @@ import {
   Trash2,
   Upload,
   UserRound,
+  Video,
   X,
 } from "lucide-react-native";
 import {
@@ -4677,12 +4681,37 @@ const isDocumentResource = (resource: ResourceListItem) => DOCUMENT_MIME_TYPES.h
 
 const getResourceIcon = (resource: ResourceListItem) => {
   const mime = (resource.mimeType || "").toLowerCase();
+  const extension = (resource.filename || "").split(".").pop()?.toLowerCase() || "";
 
   if (mime.startsWith("image/")) {
     return <ImageIcon color="#10b981" size={28} />;
   }
 
-  return <FileText color={mime === "application/pdf" ? "#dc2626" : "#2563eb"} size={28} />;
+  if (mime.startsWith("audio/")) {
+    return <Music color="#0ea5e9" size={28} />;
+  }
+
+  if (mime.startsWith("video/")) {
+    return <Video color="#e11d48" size={28} />;
+  }
+
+  if (mime === "application/pdf" || extension === "pdf") {
+    return <FileText color="#dc2626" size={28} />;
+  }
+
+  if (mime.includes("spreadsheet") || mime.includes("excel") || ["xls", "xlsx", "csv"].includes(extension)) {
+    return <FileSpreadsheet color="#16a34a" size={28} />;
+  }
+
+  if (mime.includes("word") || mime.includes("officedocument.wordprocessingml") || ["doc", "docx"].includes(extension)) {
+    return <FileText color="#2563eb" size={28} />;
+  }
+
+  if (mime.includes("zip") || mime.includes("tar") || mime.includes("rar") || mime.includes("gzip") || ["zip", "rar", "tar", "gz"].includes(extension)) {
+    return <FileArchive color="#f59e0b" size={28} />;
+  }
+
+  return <FileText color="#64748b" size={28} />;
 };
 
 const openResource = (resource: ResourceListItem) => {
