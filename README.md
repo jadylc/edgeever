@@ -11,13 +11,16 @@ EdgeEver is an open-source, self-hosted, Cloudflare-native notes workspace. It k
 
 ## Why EdgeEver
 
-Many long-time Evernote users only need a reliable, open, responsive personal knowledge base. But modern commercial notes apps are often heavier than necessary, harder to migrate away from, and increasingly shaped by subscription and add-on features.
+Many long-time **Evernote** users only need a **reliable, open, and responsive** personal knowledge base. However, existing mainstream solutions all have their pain points:
 
-Some may ask: why not migrate everything to the more open Obsidian? It was actually the first option I tried. But after using it for a while, I found it still too heavy for quick capture, especially on mobile. The official multi-device sync service costs $5 per month, while third-party sync solutions are too much hassle. So I ultimately abandoned the idea.
+* **Evernote**: It has become increasingly bloated with commercial ads and unnecessary add-ons, leading to poor performance and high memory usage. It also locks down your data, making it hard to export. The Chinese version (Yinxiang) does not support MCP, while the international version supports MCP but requires a subscription starting at $15/month with strict usage limits.
+* **Obsidian**: Although open and customizable, it is too heavy for quick, on-the-go captures (especially on mobile). Official sync costs $5/month, while third-party sync solutions require significant setup effort.
+* **Memos & lightweight notes**: Though open and simple, their stream-based layouts differ significantly from the classic Evernote-style three-pane workflow.
 
-EdgeEver fills that gap: familiar notes interaction, open data, API access, MCP support, and self-hosted deployment that is practical for individuals.
+**EdgeEver is designed to fill this gap**: it retains the familiar classic three-pane note-taking experience, while providing fully open data models, REST API, native MCP support, and zero-cost self-hosted deployment.
 
-My current best practice is to use EdgeEver to quickly capture ideas and reminders as a raw material repository. When the content needs structured organization, I use MCP to let AI integrate it into Obsidian, Notion Database, or Feishu Bitable.
+> 💡 **My current best practice:**
+> Use **EdgeEver** to quickly capture ideas and reminders as a raw "material library." When content needs structured organization, use **MCP** to let AI automatically organize and sync it into **Obsidian**, **Notion Database**, or **Feishu Bitable**.
 
 ## Online Demo
 
