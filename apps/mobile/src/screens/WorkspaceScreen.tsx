@@ -1,9 +1,8 @@
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
 import * as Clipboard from "expo-clipboard";
 import Constants from "expo-constants";
-import * as DocumentPicker from "expo-document-picker";
-import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
+import type { DocumentPickerAsset } from "expo-document-picker";
 import type { MemoFilterMode, MemoSortMode } from "@edgeever/client";
 import {
   Archive,
@@ -52,7 +51,7 @@ import {
   UserRound,
   Video,
   X,
-} from "lucide-react-native";
+} from "../components/icons";
 import {
   ActivityIndicator,
   Alert,
@@ -60,6 +59,7 @@ import {
   type AppStateStatus,
   FlatList,
   Image as RNImage,
+  InteractionManager,
   Linking,
   Modal,
   Platform,
@@ -73,7 +73,6 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { WebView } from "react-native-webview";
 import type { ApiToken, MemoDetail, MemoRevision, MemoSummary, Notebook, ResourceListItem, TagSummary } from "@edgeever/shared";
 import { clearMobileMemoDraft, readMobileMemoDraft, writeMobileMemoDraft } from "../lib/mobile-drafts";
 import {
@@ -105,8 +104,10 @@ import {
   type MobileSyncQueueSummary,
 } from "../lib/sync-queue";
 import { AccountSecurityModal } from "./AccountSecurityModal";
+import { getStartupPerformanceItems, markStartup } from "../lib/startup-performance";
 
 const ALL_NOTES_ID = "all";
+const LazyWebView = lazy(() => import("../components/LazyWebView"));
 const DEFAULT_MEMO_TITLE = "无标题笔记";
 const MOBILE_APP_VERSION = Constants.expoConfig?.version ?? "0.1.2";
 const GITHUB_REPOSITORY_URL = "https://github.com/tianma-if/edgeever";
@@ -396,6 +397,18 @@ export const WorkspaceScreen = () => {
     },
     enabled: Boolean(client && selectedMemoId),
   });
+
+  useEffect(() => {
+    markStartup("workspace-first-commit");
+    const task = InteractionManager.runAfterInteractions(() => markStartup("workspace-interactive"));
+    return () => task.cancel();
+  }, []);
+
+  useEffect(() => {
+    if (notebooksQuery.data && memosQuery.data) {
+      markStartup("workspace-data-ready");
+    }
+  }, [memosQuery.data, notebooksQuery.data]);
 
   const refresh = async () => {
     await Promise.all([
@@ -998,7 +1011,7 @@ export const WorkspaceScreen = () => {
         />
       ) : null}
 
-      <MemoDetailModal
+      {selectedMemoId ? <MemoDetailModal
         isDeleting={deleteMemoMutation.isPending}
         isLoading={memoDetailQuery.isLoading}
         isRestoring={restoreMemoMutation.isPending}
@@ -1014,10 +1027,10 @@ export const WorkspaceScreen = () => {
         onOpenRevisions={setRevisionMemo}
         onRestore={(memo) => restoreMemoMutation.mutate(memo)}
         onTogglePin={handleTogglePin}
-        visible={Boolean(selectedMemoId)}
-      />
+        visible
+      /> : null}
 
-      <EditMemoModal
+      {editingMemo ? <EditMemoModal
         memo={editingMemo}
         imageCompressionEnabled={imageCompressionEnabled}
         notebooks={notebooks}
@@ -1032,9 +1045,9 @@ export const WorkspaceScreen = () => {
           setSelectedMemoId(memo.id);
         }}
         updateMutation={updateMemoMutation}
-      />
-      <RichEditorModal baseUrl={session?.baseUrl ?? ""} memo={richEditingMemo} notebooks={notebooks} onClose={closeRichEditor} token={session?.token ?? ""} />
-      <NotebookPickerModal
+      /> : null}
+      {richEditingMemo ? <RichEditorModal baseUrl={session?.baseUrl ?? ""} memo={richEditingMemo} notebooks={notebooks} onClose={closeRichEditor} token={session?.token ?? ""} /> : null}
+      {notebookPickerOpen ? <NotebookPickerModal
         activeNotebookId={activeNotebookId}
         notebookSortMode={notebookSortMode}
         notebooks={notebooks}
@@ -1044,39 +1057,39 @@ export const WorkspaceScreen = () => {
           setActiveNotebookId(notebookId);
           setNotebookPickerOpen(false);
         }}
-        visible={notebookPickerOpen}
-      />
+        visible
+      /> : null}
 
-      <NotebookManagerModal
+      {notebookManagerOpen ? <NotebookManagerModal
         notebookSortMode={notebookSortMode}
         notebooks={notebooks}
         onClose={() => setNotebookManagerOpen(false)}
         onSortModeChange={handleNotebookSortModeChange}
-        visible={notebookManagerOpen}
-      />
-      <TagsManagerModal onClose={() => setTagsManagerOpen(false)} visible={tagsManagerOpen} />
-      <ResourcesModal activeMemo={selectedMemo} imageCompressionEnabled={imageCompressionEnabled} onClose={() => setResourcesOpen(false)} visible={resourcesOpen} />
-      <ApiTokensModal baseUrl={session?.baseUrl ?? ""} onClose={() => setApiTokensOpen(false)} visible={apiTokensOpen} />
-      <EvernoteGuideModal onClose={() => setEvernoteGuideOpen(false)} visible={evernoteGuideOpen} />
-      <AdvancedPlayModal onClose={() => setAdvancedPlayOpen(false)} visible={advancedPlayOpen} />
-      <SyncQueueModal
+        visible
+      /> : null}
+      {tagsManagerOpen ? <TagsManagerModal onClose={() => setTagsManagerOpen(false)} visible /> : null}
+      {resourcesOpen ? <ResourcesModal activeMemo={selectedMemo} imageCompressionEnabled={imageCompressionEnabled} onClose={() => setResourcesOpen(false)} visible /> : null}
+      {apiTokensOpen ? <ApiTokensModal baseUrl={session?.baseUrl ?? ""} onClose={() => setApiTokensOpen(false)} visible /> : null}
+      {evernoteGuideOpen ? <EvernoteGuideModal onClose={() => setEvernoteGuideOpen(false)} visible /> : null}
+      {advancedPlayOpen ? <AdvancedPlayModal onClose={() => setAdvancedPlayOpen(false)} visible /> : null}
+      {syncQueueOpen ? <SyncQueueModal
         onClose={() => setSyncQueueOpen(false)}
         onChanged={async () => setSyncQueueSummary(await loadMobileSyncQueueSummary())}
         onSync={handleSyncQueuedChanges}
-        visible={syncQueueOpen}
-      />
-      <SystemInfoModal baseUrl={session?.baseUrl ?? ""} memoCount={memoCount} notebookCount={notebooks.length} onClose={() => setSystemInfoOpen(false)} visible={systemInfoOpen} />
-      <AccountSecurityModal currentUser={session?.user ?? null} onClose={() => setAccountSecurityOpen(false)} visible={accountSecurityOpen} />
-      <RevisionHistoryModal
+        visible
+      /> : null}
+      {systemInfoOpen ? <SystemInfoModal baseUrl={session?.baseUrl ?? ""} memoCount={memoCount} notebookCount={notebooks.length} onClose={() => setSystemInfoOpen(false)} visible /> : null}
+      {accountSecurityOpen ? <AccountSecurityModal currentUser={session?.user ?? null} onClose={() => setAccountSecurityOpen(false)} visible /> : null}
+      {revisionMemo ? <RevisionHistoryModal
         memo={revisionMemo}
         onClose={() => setRevisionMemo(null)}
         onRestored={(memo) => {
           setRevisionMemo(null);
           setSelectedMemoId(memo.id);
         }}
-      />
+      /> : null}
 
-      <CreateMemoModal
+      {createOpen ? <CreateMemoModal
         activeNotebookId={activeNotebookId}
         notebooks={notebooks}
         onClose={() => setCreateOpen(false)}
@@ -1088,10 +1101,10 @@ export const WorkspaceScreen = () => {
           setSelectedMemoId(null);
           setRichEditingMemo(memo);
         }}
-        visible={createOpen}
-      />
+        visible
+      /> : null}
 
-      <TemplatesModal
+      {templatesOpen ? <TemplatesModal
         activeNotebookId={activeNotebookId}
         notebooks={notebooks}
         onClose={() => setTemplatesOpen(false)}
@@ -1103,19 +1116,19 @@ export const WorkspaceScreen = () => {
           setSelectedMemoId(null);
           setRichEditingMemo(memo);
         }}
-        visible={templatesOpen}
-      />
+        visible
+      /> : null}
 
-      <MoveSelectionModal
+      {selectionMoveOpen ? <MoveSelectionModal
         isMoving={moveMemosMutation.isPending}
         notebooks={notebooks}
         onClose={() => setSelectionMoveOpen(false)}
         onMove={(notebookId) => moveMemosMutation.mutate({ memoIds: selectedMemoIdList, notebookId })}
         selectedCount={selectedMemoIds.size}
-        visible={selectionMoveOpen}
-      />
+        visible
+      /> : null}
 
-      <NotesActionsModal
+      {notesActionsOpen ? <NotesActionsModal
         memoListDensity={memoListDensity}
         memoSortMode={memoSortMode}
         memoView={memoView}
@@ -1147,10 +1160,10 @@ export const WorkspaceScreen = () => {
           setNotesActionsOpen(false);
           setMemoView(memoView === "trash" ? "notebook" : "trash");
         }}
-        visible={notesActionsOpen}
-      />
+        visible
+      /> : null}
 
-      <MemoActionsModal
+      {memoActionsMemo ? <MemoActionsModal
         isBusy={deleteMemosMutation.isPending || pinMemosMutation.isPending || restoreMemoByIdMutation.isPending}
         memo={memoActionsMemo}
         memoView={memoView}
@@ -1174,7 +1187,7 @@ export const WorkspaceScreen = () => {
           setMemoActionsMemo(null);
           pinMemosMutation.mutate({ memoIds: [memo.id], isPinned: !memo.isPinned });
         }}
-      />
+      /> : null}
 
       {activeView === "notes" && selectionMode ? (
         <SelectionActionBar
@@ -3160,6 +3173,7 @@ const SystemInfoModal = ({
     { label: copy.memoCount, value: String(memoCount) },
     { label: copy.timeZone, value: Intl.DateTimeFormat().resolvedOptions().timeZone || copy.unknown },
     { label: copy.language, value: localePreference === "system" ? `${resolvedLocale} (${copy.followSystem})` : resolvedLocale },
+    ...getStartupPerformanceItems(),
   ];
 
   const copySystemInfo = async () => {
@@ -3271,6 +3285,7 @@ const ResourcesModal = ({
         throw new Error("回收站中的笔记不能上传资源");
       }
 
+      const DocumentPicker = await import("expo-document-picker");
       const result = await DocumentPicker.getDocumentAsync({
         copyToCacheDirectory: true,
         multiple: true,
@@ -4076,23 +4091,25 @@ const RichEditorModal = ({
                   <Text style={styles.mutedText}>请确认实例已部署最新版 Web/PWA 资源。</Text>
                 </View>
               ) : (
-                <WebView
-                  allowsBackForwardNavigationGestures
-                  injectedJavaScriptBeforeContentLoaded={injectedJavaScriptBeforeContentLoaded}
-                  onError={() => {
-                    setLoading(false);
-                    setError(true);
-                  }}
-                  onLoadEnd={() => setLoading(false)}
-                  onNavigationStateChange={(state) => {
-                    if (state.url && !state.url.includes("/mobile-edit.html") && !state.url.startsWith("about:")) {
-                      onClose();
-                    }
-                  }}
-                  originWhitelist={["http://*", "https://*"]}
-                  source={{ uri: editorUrl }}
-                  style={styles.richEditorWebView}
-                />
+                <Suspense fallback={<ActivityIndicator color="#0f172a" />}>
+                  <LazyWebView
+                    allowsBackForwardNavigationGestures
+                    injectedJavaScriptBeforeContentLoaded={injectedJavaScriptBeforeContentLoaded}
+                    onError={() => {
+                      setLoading(false);
+                      setError(true);
+                    }}
+                    onLoadEnd={() => setLoading(false)}
+                    onNavigationStateChange={(state) => {
+                      if (state.url && !state.url.includes("/mobile-edit.html") && !state.url.startsWith("about:")) {
+                        onClose();
+                      }
+                    }}
+                    originWhitelist={["http://*", "https://*"]}
+                    source={{ uri: editorUrl }}
+                    style={styles.richEditorWebView}
+                  />
+                </Suspense>
               )}
             </View>
           </View>
@@ -4239,6 +4256,7 @@ const EditMemoModal = ({
         throw new Error("回收站中的笔记不能上传资源");
       }
 
+      const DocumentPicker = await import("expo-document-picker");
       const result = await DocumentPicker.getDocumentAsync({
         copyToCacheDirectory: true,
         multiple: true,
@@ -4947,7 +4965,12 @@ const MemoCard = memo(function MemoCard({
       </View>
     </Pressable>
   );
-});
+}, (previous, next) =>
+  previous.memo === next.memo &&
+  previous.listDensity === next.listDensity &&
+  previous.selected === next.selected &&
+  previous.selectionMode === next.selectionMode
+);
 
 const PanelRow = ({ label, value }: { label: string; value: string }) => (
   <View style={styles.panelRow}>
@@ -5513,7 +5536,7 @@ const appendResourceMarkdown = (
 };
 
 const prepareUploadAsset = async (
-  asset: DocumentPicker.DocumentPickerAsset,
+  asset: DocumentPickerAsset,
   imageCompressionEnabled: boolean
 ): Promise<{ uri: string; name: string; type: string }> => {
   const mimeType = asset.mimeType || "application/octet-stream";
@@ -5528,6 +5551,7 @@ const prepareUploadAsset = async (
   }
 
   try {
+    const { manipulateAsync, SaveFormat } = await import("expo-image-manipulator");
     const measured = await manipulateAsync(asset.uri, [], { compress: 1, format: SaveFormat.JPEG });
     const maxEdge = Math.max(measured.width, measured.height);
     const resizeAction = maxEdge > MAX_COMPRESSED_IMAGE_EDGE ? [{ resize: getCompressedImageSize(measured.width, measured.height) }] : [];

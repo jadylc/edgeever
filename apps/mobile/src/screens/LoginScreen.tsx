@@ -11,7 +11,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { ExternalLink, LockKeyhole } from "lucide-react-native";
+import { ExternalLink, LockKeyhole } from "../components/icons";
 import { useSession } from "../lib/session";
 
 const GITHUB_REPOSITORY_URL = "https://github.com/tianma-if/edgeever";

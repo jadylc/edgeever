@@ -1,7 +1,7 @@
 import { ApiRequestError } from "@edgeever/client";
 import type { AuthUser } from "@edgeever/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, UserRound, Users, X } from "lucide-react-native";
+import { KeyRound, Plus, UserRound, Users, X } from "../components/icons";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
