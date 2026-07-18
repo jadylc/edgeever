@@ -18,6 +18,8 @@ type PickedImage = {
 export interface LocalTiptapEditorRef extends DOMImperativeFactory {
   flush: () => void;
   focus: () => void;
+  replaceAll: DOMImperativeFactory[string];
+  search: DOMImperativeFactory[string];
 }
 
 type LocalTiptapEditorProps = {
@@ -27,6 +29,7 @@ type LocalTiptapEditorProps = {
   onChange: (content: EditorDoc) => Promise<void>;
   onPickImage: () => Promise<PickedImage | null>;
   onReady: (startupMs: number) => Promise<void>;
+  onSearchState?: (count: number, activeIndex: number) => Promise<void>;
   ref: Ref<LocalTiptapEditorRef>;
   locale: "zh-CN" | "en-US";
   theme: "light" | "dark";
@@ -40,10 +43,12 @@ export default function LocalTiptapEditor(props: LocalTiptapEditorProps) {
   const onChangeRef = useRef(props.onChange);
   const onPickImageRef = useRef(props.onPickImage);
   const onReadyRef = useRef(props.onReady);
+  const onSearchStateRef = useRef(props.onSearchState);
 
   onChangeRef.current = props.onChange;
   onPickImageRef.current = props.onPickImage;
   onReadyRef.current = props.onReady;
+  onSearchStateRef.current = props.onSearchState;
 
   const editor = useEditor({
     extensions: [
@@ -89,13 +94,79 @@ export default function LocalTiptapEditor(props: LocalTiptapEditorProps) {
     void onChangeRef.current(normalizeImageSources(editor.getJSON() as EditorDoc, props.baseUrl));
   }, [editor, props.baseUrl]);
 
+  const findSearchMatches = useCallback((query: string) => {
+    const needle = query.trim().toLocaleLowerCase();
+    if (!editor || editor.isDestroyed || needle.length === 0) {
+      return [];
+    }
+
+    const characters: Array<{ char: string; pos: number }> = [];
+    let previousTextEnd: number | null = null;
+    editor.state.doc.descendants((node, pos) => {
+      if (!node.isText || !node.text) {
+        return;
+      }
+      if (previousTextEnd !== null && pos > previousTextEnd) {
+        characters.push({ char: "\u0000", pos: -1 });
+      }
+      for (let index = 0; index < node.text.length; index += 1) {
+        characters.push({ char: node.text[index] ?? "", pos: pos + index });
+      }
+      previousTextEnd = pos + node.text.length;
+    });
+
+    const haystack = characters.map((item) => item.char).join("").toLocaleLowerCase();
+    const matches: Array<{ from: number; to: number }> = [];
+    let index = haystack.indexOf(needle);
+    while (index !== -1) {
+      const start = characters[index];
+      const end = characters[index + needle.length - 1];
+      if (start && end && start.pos >= 0 && end.pos >= 0) {
+        matches.push({ from: start.pos, to: end.pos + 1 });
+      }
+      index = haystack.indexOf(needle, index + needle.length);
+    }
+    return matches;
+  }, [editor]);
+
+  const search = useCallback((query: string, requestedIndex: number) => {
+    const matches = findSearchMatches(query);
+    const activeIndex = matches.length > 0
+      ? ((Math.trunc(requestedIndex) % matches.length) + matches.length) % matches.length
+      : 0;
+    const match = matches[activeIndex];
+    if (match && editor && !editor.isDestroyed) {
+      editor.chain().setTextSelection(match).scrollIntoView().run();
+    }
+    void onSearchStateRef.current?.(matches.length, activeIndex);
+  }, [editor, findSearchMatches]);
+
+  const replaceAll = useCallback((query: string, replacement: string) => {
+    const matches = findSearchMatches(query);
+    if (!editor || editor.isDestroyed || matches.length === 0) {
+      void onSearchStateRef.current?.(0, 0);
+      return;
+    }
+
+    editor.chain().command(({ tr, dispatch }) => {
+      for (const match of [...matches].reverse()) {
+        tr.insertText(replacement, match.from, match.to);
+      }
+      dispatch?.(tr);
+      return true;
+    }).run();
+    window.requestAnimationFrame(() => search(query, 0));
+  }, [editor, findSearchMatches, search]);
+
   useDOMImperativeHandle(
     props.ref,
     () => ({
       flush,
       focus: () => editor?.commands.focus(),
+      replaceAll: (...args: Parameters<DOMImperativeFactory[string]>) => replaceAll(String(args[0] ?? ""), String(args[1] ?? "")),
+      search: (...args: Parameters<DOMImperativeFactory[string]>) => search(String(args[0] ?? ""), Number(args[1] ?? 0)),
     }),
-    [editor, flush]
+    [editor, flush, replaceAll, search]
   );
 
   useEffect(() => {
