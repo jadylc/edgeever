@@ -9,6 +9,7 @@ import {
   type TextProps,
 } from "react-native";
 import { translateCurrentMobileText, useMobileLocale } from "../lib/mobile-locale";
+import { presentAppDialog } from "./app-dialog-controller";
 
 const translateChildren = (children: ReactNode, translate: (value: string) => string): ReactNode =>
   Children.map(children, (child) => {
@@ -61,11 +62,16 @@ export const Pressable = forwardRef<ComponentRef<typeof NativePressable>, Pressa
 Pressable.displayName = "LocalizedPressable";
 
 export const Alert = {
-  alert: (...[title, message, buttons, options]: Parameters<typeof NativeAlert.alert>) =>
-    NativeAlert.alert(
-      translateCurrentMobileText(title),
-      message ? translateCurrentMobileText(message) : message,
-      buttons?.map((button) => ({ ...button, text: button.text ? translateCurrentMobileText(button.text) : button.text })),
-      options
-    ),
+  alert: (...[title, message, buttons, options]: Parameters<typeof NativeAlert.alert>) => {
+    const translatedTitle = translateCurrentMobileText(title);
+    const translatedMessage = message ? translateCurrentMobileText(message) : message;
+    const translatedButtons = buttons?.map((button) => ({
+      ...button,
+      text: button.text ? translateCurrentMobileText(button.text) : button.text,
+    }));
+    if (presentAppDialog({ title: translatedTitle, message: translatedMessage, buttons: translatedButtons, options })) {
+      return;
+    }
+    NativeAlert.alert(translatedTitle, translatedMessage, translatedButtons, options);
+  },
 };

@@ -884,21 +884,26 @@ export const WorkspaceScreen = () => {
   };
 
   const handleDeleteMemo = (memo: MemoDetail) => {
-    Alert.alert(memoView === "trash" ? "永久删除笔记？" : "删除笔记？", memoView === "trash" ? "此操作不可撤销。" : "笔记会移动到回收站。", [
+    const permanent = memoView === "trash" || memo.isDeleted;
+    if (!permanent) {
+      deleteMemoMutation.mutate({ memo, permanent: false });
+      return;
+    }
+    Alert.alert("永久删除笔记", "这个操作不可恢复。", [
       { text: "取消", style: "cancel" },
       {
-        text: memoView === "trash" ? "永久删除" : "删除",
+        text: "永久删除",
         style: "destructive",
-        onPress: () => deleteMemoMutation.mutate({ memo, permanent: memoView === "trash" }),
+        onPress: () => deleteMemoMutation.mutate({ memo, permanent: true }),
       },
     ]);
   };
 
   const handleEmptyTrash = () => {
-    Alert.alert("清空回收站？", "回收站中的笔记会被永久删除，此操作不可撤销。", [
+    Alert.alert("清空回收站", "回收站中的全部笔记和仍关联的附件都会删除，这个操作不可恢复。", [
       { text: "取消", style: "cancel" },
       {
-        text: "清空",
+        text: "清空回收站",
         style: "destructive",
         onPress: () => emptyTrashMutation.mutate(),
       },
@@ -907,28 +912,35 @@ export const WorkspaceScreen = () => {
 
   const handleDeleteSelection = () => {
     const permanent = memoView === "trash";
-
-    Alert.alert(permanent ? "永久删除选中笔记？" : "删除选中笔记？", permanent ? "此操作不可撤销。" : "选中的笔记会移动到回收站。", [
+    if (!permanent) {
+      deleteMemosMutation.mutate({ memoIds: selectedMemoIdList, permanent: false });
+      return;
+    }
+    Alert.alert(`永久删除 ${selectedMemoIdList.length} 条笔记`, "这个操作不可恢复。", [
       { text: "取消", style: "cancel" },
       {
-        text: permanent ? "永久删除" : "删除",
+        text: "永久删除",
         style: "destructive",
-        onPress: () => deleteMemosMutation.mutate({ memoIds: selectedMemoIdList, permanent }),
+        onPress: () => deleteMemosMutation.mutate({ memoIds: selectedMemoIdList, permanent: true }),
       },
     ]);
   };
 
   const requestDeleteMemoSummary = (memo: MemoSummary) => {
     const permanent = memoView === "trash";
-
-    Alert.alert(permanent ? "永久删除笔记？" : "删除笔记？", permanent ? "此操作不可撤销。" : "笔记会移动到回收站。", [
+    if (!permanent) {
+      setMemoActionsMemo(null);
+      deleteMemosMutation.mutate({ memoIds: [memo.id], permanent: false });
+      return;
+    }
+    Alert.alert("永久删除笔记", "这个操作不可恢复。", [
       { text: "取消", style: "cancel" },
       {
-        text: permanent ? "永久删除" : "删除",
+        text: "永久删除",
         style: "destructive",
         onPress: () => {
           setMemoActionsMemo(null);
-          deleteMemosMutation.mutate({ memoIds: [memo.id], permanent });
+          deleteMemosMutation.mutate({ memoIds: [memo.id], permanent: true });
         },
       },
     ]);
@@ -946,13 +958,7 @@ export const WorkspaceScreen = () => {
 
     const targetNotebookId = activeNotebookId === ALL_NOTES_ID ? selectedMemos[0]?.notebookId : activeNotebookId;
 
-    Alert.alert("合并选中笔记？", "服务端会把选中的笔记合并成一条新笔记。", [
-      { text: "取消", style: "cancel" },
-      {
-        text: "合并",
-        onPress: () => mergeMemosMutation.mutate({ memoIds: selectedMemoIdList, notebookId: targetNotebookId }),
-      },
-    ]);
+    mergeMemosMutation.mutate({ memoIds: selectedMemoIdList, notebookId: targetNotebookId });
   };
 
   const handleSyncQueuedChanges = async () => {
@@ -2876,7 +2882,7 @@ const NotebookManagerModal = ({
       return;
     }
 
-    Alert.alert("删除笔记本？", `将删除“${notebook.name}”。如果服务端不允许删除非空笔记本，请先移动或删除其中笔记。`, [
+    Alert.alert(`删除笔记本「${notebook.name}」`, "请先清空其中的笔记和子笔记本。删除后无法从这里恢复。", [
       { text: "取消", style: "cancel" },
       {
         text: "删除",
@@ -3113,10 +3119,10 @@ const TagsManagerModal = ({ onClose, visible }: { onClose: () => void; visible: 
   });
 
   const requestDeleteTag = (tag: TagSummary) => {
-    Alert.alert("删除标签？", `将从 ${tag.memoCount} 条笔记中移除 #${tag.name}。`, [
+    Alert.alert(`删除标签 #${tag.name}`, `将从 ${tag.memoCount} 条笔记中移除这个标签，笔记内容不会被删除。`, [
       { text: "取消", style: "cancel" },
       {
-        text: "删除",
+        text: "删除标签",
         style: "destructive",
         onPress: () => deleteTagMutation.mutate(tag.name),
       },
@@ -3334,10 +3340,10 @@ const ApiTokensContent = ({ active, baseUrl }: { active: boolean; baseUrl: strin
   };
 
   const requestRevokeToken = (token: ApiToken) => {
-    Alert.alert("撤销 Token？", `将撤销“${token.name}”，使用它的 MCP 客户端会失去访问权限。`, [
+    Alert.alert(`确定要删除 Token「${token.name}」吗？`, "删除操作不可逆。一旦删除，使用此 Token 进行 API 或 MCP 调用的一切客户端将立即失效并被拒绝访问。", [
       { text: "取消", style: "cancel" },
       {
-        text: "撤销",
+        text: "确认删除",
         style: "destructive",
         onPress: () => revokeTokenMutation.mutate(token.id),
       },
@@ -4376,11 +4382,16 @@ const MemoDetailModal = ({
   onTogglePin: (memo: MemoDetail) => void;
   visible: boolean;
 }) => {
+  const { resolvedTheme, toggleTheme } = useMobileTheme();
   const [actionsOpen, setActionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const localePreference = useMobileLocalePreference();
+  const themedDetailMarkdownStyles = useMemo(
+    () => resolveMobileThemeStyles(detailMarkdownStyles, resolvedTheme),
+    [resolvedTheme]
+  );
   const detailText = memo?.contentMarkdown || memo?.contentText || "没有正文内容";
   const searchMatches = useMemo(() => getTextSearchMatches(detailText, searchQuery), [detailText, searchQuery]);
   const searchMatchLabel = searchQuery.trim() ? `${searchMatches.length > 0 ? activeMatchIndex + 1 : 0}/${searchMatches.length}` : "0/0";
@@ -4409,12 +4420,22 @@ const MemoDetailModal = ({
           <Pressable accessibilityLabel="返回" accessibilityRole="button" onPress={onClose} style={styles.detailHeaderButton}>
             <ChevronLeft color="#475569" size={21} />
           </Pressable>
-          <Text style={styles.detailSyncStatus}>{isSaving ? "保存中" : "已同步"}</Text>
-          {memo ? (
-            <Pressable accessibilityLabel="笔记操作" accessibilityRole="button" onPress={() => setActionsOpen(true)} style={styles.detailHeaderButton}>
-              <MoreHorizontal color="#475569" size={21} />
+          <View style={styles.detailHeaderActions}>
+            <Text numberOfLines={1} style={styles.detailSyncStatus}>{isSaving ? "保存中" : "已同步"}</Text>
+            <Pressable
+              accessibilityLabel={resolvedTheme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
+              accessibilityRole="button"
+              onPress={toggleTheme}
+              style={styles.detailHeaderIconButton}
+            >
+              {resolvedTheme === "dark" ? <Sun color="#475569" size={19} /> : <Moon color="#475569" size={19} />}
             </Pressable>
-          ) : null}
+            {memo ? (
+              <Pressable accessibilityLabel="笔记操作" accessibilityRole="button" onPress={() => setActionsOpen(true)} style={styles.detailHeaderIconButton}>
+                <MoreHorizontal color="#475569" size={21} />
+              </Pressable>
+            ) : null}
+          </View>
         </View>
 
         {isLoading ? (
@@ -4458,7 +4479,7 @@ const MemoDetailModal = ({
             {searchOpen && searchQuery.trim() ? (
               <HighlightedDetailText activeIndex={activeMatchIndex} matches={searchMatches} text={detailText} />
             ) : (
-              <Markdown style={detailMarkdownStyles}>{detailText}</Markdown>
+              <Markdown style={themedDetailMarkdownStyles}>{detailText}</Markdown>
             )}
           </ScrollView>
         ) : (
@@ -8564,12 +8585,25 @@ const baseWorkspaceStyles = StyleSheet.create({
     justifyContent: "center",
     width: 40,
   },
+  detailHeaderActions: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 2,
+  },
+  detailHeaderIconButton: {
+    alignItems: "center",
+    borderRadius: 18,
+    height: 36,
+    justifyContent: "center",
+    width: 36,
+  },
   detailSyncStatus: {
     backgroundColor: "#f1f5f9",
     borderRadius: 999,
     color: "#64748b",
     fontSize: 12,
     fontWeight: "700",
+    maxWidth: 88,
     overflow: "hidden",
     paddingHorizontal: 10,
     paddingVertical: 5,
