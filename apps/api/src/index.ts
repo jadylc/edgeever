@@ -50,8 +50,19 @@ import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import openApiSpec from "../../../docs/openapi.json";
-import { hasBootstrapCredential, verifyBootstrapPassword } from "./auth-bootstrap";
-import { isDemoModeEnabled, resolveDemoPasswordHash } from "./demo-mode";
+import { hasBootstrapCredential, isSupportedPasswordHash, verifyBootstrapPassword } from "./auth-bootstrap";
+import {
+  isDatabaseNotReadyError,
+  isUnauthenticatedAccessEnabled,
+  resolveInstanceAuthMode,
+  type InstanceAuthMode,
+} from "./auth-state";
+import {
+  isDemoModeEnabled,
+  isProtectedDemoAccount,
+  resolveDemoPasswordHash,
+  shouldUpsertDemoSeedRecord,
+} from "./demo-mode";
 
 type Bindings = {
   DB: D1Database;
@@ -63,6 +74,7 @@ type Bindings = {
   EDGE_EVER_R2_BUCKET_NAME?: string;
   EDGE_EVER_DEMO_MODE?: string;
   EDGE_EVER_LOCAL_DEMO_SEED?: string;
+  EDGE_EVER_ALLOW_UNAUTHENTICATED?: string;
 };
 
 type AuthContext = {
@@ -115,6 +127,13 @@ type MemoSummaryRow = {
 
 type MemoListSortMode = "updated-desc" | "created-desc" | "title-asc";
 type MemoListFilterMode = "all" | "tagged" | "untagged" | "pinned";
+
+type MobileSyncChangeRow = {
+  id: number;
+  entity_type: "notebook" | "memo";
+  entity_id: string;
+  operation: "upsert" | "delete";
+};
 
 type MemoListCursor = {
   sort: MemoListSortMode;
@@ -415,20 +434,31 @@ app.use(
   })
 );
 
-app.get("/api/health", (c) =>
-  c.json({
+app.get("/api/health", async (c) => {
+  const authMode = await getInstanceAuthMode(c.env);
+
+  if (authMode === "unconfigured") {
+    return authNotConfigured(c);
+  }
+
+  return c.json({
     ok: true,
     name: "edgeever",
     runtime: "cloudflare-workers",
-  })
-);
+    authMode,
+  });
+});
 
 app.get("/api/openapi.json", (c) => c.json(openApiSpec));
 
 app.get("/api/v1/auth/session", async (c) => {
-  const authRequired = await isAuthRequired(c.env);
+  const authMode = await getInstanceAuthMode(c.env);
 
-  if (!authRequired) {
+  if (authMode === "unconfigured") {
+    return authNotConfigured(c);
+  }
+
+  if (authMode === "disabled") {
     return c.json({
       authRequired: false,
       authenticated: true,
@@ -461,6 +491,11 @@ app.get("/api/v1/auth/session", async (c) => {
 });
 
 app.post("/api/v1/auth/login", zValidator("json", LoginSchema), async (c) => {
+  const authMode = await getInstanceAuthMode(c.env);
+  if (authMode === "unconfigured") {
+    return authNotConfigured(c);
+  }
+
   const input = c.req.valid("json");
   const user = await verifyLogin(c.env, input.username, input.password);
 
@@ -606,6 +641,12 @@ app.patch("/api/v1/users/:id", zValidator("json", UserUpdateSchema), async (c) =
   const input = c.req.valid("json");
   const current = await getInstanceUser(c.env.DB, userId);
   if (!current) return notFound(c, "User not found");
+  if (
+    isProtectedDemoAccount(c.env.EDGE_EVER_DEMO_MODE, c.env.EDGE_EVER_AUTH_USERNAME, current.username)
+    && (input.password !== undefined || input.isDisabled !== undefined)
+  ) {
+    return forbidden(c, "The demo owner account uses fixed credentials and cannot be modified.");
+  }
   if (current.role === "owner" && input.isDisabled === true) {
     return badRequest(c, "The instance owner cannot be disabled.");
   }
@@ -660,9 +701,13 @@ app.use("/api/v1/*", async (c, next) => {
     return;
   }
 
-  const authRequired = await isAuthRequired(c.env);
+  const authMode = await getInstanceAuthMode(c.env);
 
-  if (!authRequired) {
+  if (authMode === "unconfigured") {
+    return authNotConfigured(c);
+  }
+
+  if (authMode === "disabled") {
     c.set("auth", {
       kind: "user",
       actorType: "user",
@@ -786,6 +831,135 @@ app.get("/api/v1/notebooks", async (c) => {
   ).bind(getWorkspaceId(c)).all<NotebookRow>();
 
   return c.json({ notebooks: rows.results.map(mapNotebook) });
+});
+
+app.get("/api/v1/sync/bootstrap", async (c) => {
+  const denied = requireScopes(c, "read:notebooks", "read:memos");
+
+  if (denied) {
+    return denied;
+  }
+
+  const workspaceId = getWorkspaceId(c);
+  const limit = clampNumber(Number(c.req.query("limit") ?? 100), 1, 200);
+  const afterId = c.req.query("afterId")?.trim() ?? "";
+  const [notebookRows, memoRows, totalRow, cursorRow] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order,
+              n.created_at, n.updated_at, COUNT(m.id) AS memo_count, MAX(m.updated_at) AS last_memo_updated_at
+       FROM notebooks n
+       LEFT JOIN memos m ON m.notebook_id = n.id AND m.workspace_id = n.workspace_id AND m.is_deleted = 0
+       WHERE n.workspace_id = ? AND n.is_deleted = 0
+       GROUP BY n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order, n.created_at, n.updated_at
+       ORDER BY n.sort_order ASC, n.name ASC`
+    ).bind(workspaceId).all<NotebookRow>(),
+    c.env.DB.prepare(
+      `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
+              m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
+              mc.content_json, mc.content_markdown, mc.content_text, mc.content_hash,
+              m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
+       FROM memos m
+       INNER JOIN memo_contents mc ON mc.memo_id = m.id
+       WHERE m.workspace_id = ? AND m.id > ?
+       ORDER BY m.id ASC
+       LIMIT ?`
+    ).bind(workspaceId, afterId, limit + 1).all<MemoDetailRow>(),
+    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM memos WHERE workspace_id = ?`).bind(workspaceId).first<{ count: number }>(),
+    c.env.DB.prepare(
+      `SELECT w.created_at AS sync_identity, COALESCE(MAX(c.id), 0) AS cursor
+       FROM workspaces w
+       LEFT JOIN mobile_sync_changes c ON c.workspace_id = w.id
+       WHERE w.id = ?
+       GROUP BY w.created_at`
+    ).bind(workspaceId).first<{ cursor: number; sync_identity: string }>(),
+  ]);
+  const page = memoRows.results.slice(0, limit);
+  const totalCount = totalRow?.count ?? page.length;
+  const nextAfterId = memoRows.results.length > limit ? page.at(-1)?.id ?? null : null;
+
+  return c.json({
+    notebooks: notebookRows.results.map(mapNotebook),
+    memos: page.map(mapMemoDetail),
+    snapshotCursor: cursorRow?.cursor ?? 0,
+    syncIdentity: cursorRow?.sync_identity,
+    totalCount,
+    nextAfterId,
+  });
+});
+
+app.get("/api/v1/sync/changes", async (c) => {
+  const denied = requireScopes(c, "read:notebooks", "read:memos");
+
+  if (denied) {
+    return denied;
+  }
+
+  const workspaceId = getWorkspaceId(c);
+  const cursor = clampNumber(Number(c.req.query("cursor") ?? 0), 0, Number.MAX_SAFE_INTEGER);
+  const limit = clampNumber(Number(c.req.query("limit") ?? 100), 1, 200);
+  const [rows, cursorRow] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT id, entity_type, entity_id, operation
+       FROM mobile_sync_changes
+       WHERE workspace_id = ? AND id > ?
+       ORDER BY id ASC
+       LIMIT ?`
+    ).bind(workspaceId, cursor, limit + 1).all<MobileSyncChangeRow>(),
+    c.env.DB.prepare(
+      `SELECT w.created_at AS sync_identity, COALESCE(MAX(c.id), 0) AS cursor
+       FROM workspaces w
+       LEFT JOIN mobile_sync_changes c ON c.workspace_id = w.id
+       WHERE w.id = ?
+       GROUP BY w.created_at`
+    ).bind(workspaceId).first<{ cursor: number; sync_identity: string }>(),
+  ]);
+  const page = rows.results.slice(0, limit);
+  const memoIds = Array.from(new Set(page.filter((change) => change.entity_type === "memo" && change.operation === "upsert").map((change) => change.entity_id)));
+  const notebookIds = Array.from(new Set(page.filter((change) => change.entity_type === "notebook" && change.operation === "upsert").map((change) => change.entity_id)));
+  const memoPlaceholders = memoIds.map(() => "?").join(", ");
+  const notebookPlaceholders = notebookIds.map(() => "?").join(", ");
+  const [memoRows, notebookRows] = await Promise.all([
+    memoIds.length > 0
+      ? c.env.DB.prepare(
+          `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
+                  m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
+                  mc.content_json, mc.content_markdown, mc.content_text, mc.content_hash,
+                  m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
+           FROM memos m
+           INNER JOIN memo_contents mc ON mc.memo_id = m.id
+           WHERE m.workspace_id = ? AND m.id IN (${memoPlaceholders})`
+        ).bind(workspaceId, ...memoIds).all<MemoDetailRow>()
+      : Promise.resolve({ results: [] as MemoDetailRow[] }),
+    notebookIds.length > 0
+      ? c.env.DB.prepare(
+          `SELECT n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order,
+                  n.created_at, n.updated_at, COUNT(m.id) AS memo_count, MAX(m.updated_at) AS last_memo_updated_at
+           FROM notebooks n
+           LEFT JOIN memos m ON m.notebook_id = n.id AND m.workspace_id = n.workspace_id AND m.is_deleted = 0
+           WHERE n.workspace_id = ? AND n.is_deleted = 0 AND n.id IN (${notebookPlaceholders})
+           GROUP BY n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order, n.created_at, n.updated_at`
+        ).bind(workspaceId, ...notebookIds).all<NotebookRow>()
+      : Promise.resolve({ results: [] as NotebookRow[] }),
+  ]);
+  const memosById = new Map(memoRows.results.map((row) => [row.id, mapMemoDetail(row)]));
+  const notebooksById = new Map(notebookRows.results.map((row) => [row.id, mapNotebook(row)]));
+  const changes = page.map((change) => {
+    if (change.entity_type === "memo") {
+      const memo = change.operation === "upsert" ? memosById.get(change.entity_id) ?? null : null;
+      return { cursor: change.id, entityType: change.entity_type, entityId: change.entity_id, operation: memo ? "upsert" as const : "delete" as const, notebook: null, memo };
+    }
+
+    const notebook = change.operation === "upsert" ? notebooksById.get(change.entity_id) ?? null : null;
+    return { cursor: change.id, entityType: change.entity_type, entityId: change.entity_id, operation: notebook ? "upsert" as const : "delete" as const, notebook, memo: null };
+  });
+
+  return c.json({
+    changes,
+    cursor: page.at(-1)?.id ?? cursor,
+    hasMore: rows.results.length > limit,
+    serverCursor: cursorRow?.cursor ?? 0,
+    syncIdentity: cursorRow?.sync_identity,
+  });
 });
 
 app.post("/api/v1/notebooks", zValidator("json", NotebookCreateSchema), async (c) => {
@@ -928,6 +1102,7 @@ app.get("/api/v1/memos", async (c) => {
   }
 
   const notebookId = c.req.query("notebookId");
+  const includeNotebookDescendants = c.req.query("includeDescendants") === "1";
   const q = c.req.query("q")?.trim();
   const includeTrash = c.req.query("trash") === "1";
   const sort = normalizeMemoListSort(c.req.query("sort"));
@@ -940,8 +1115,29 @@ app.get("/api/v1/memos", async (c) => {
   const baseBinds: unknown[] = [getWorkspaceId(c)];
 
   if (notebookId) {
-    baseConditions.push("m.notebook_id = ?");
-    baseBinds.push(notebookId);
+    if (includeNotebookDescendants) {
+      baseConditions.push(
+        `m.notebook_id IN (
+           WITH RECURSIVE descendants(id) AS (
+             SELECT id
+             FROM notebooks
+             WHERE workspace_id = ? AND id = ? AND is_deleted = 0
+
+             UNION
+
+             SELECT n.id
+             FROM notebooks n
+             INNER JOIN descendants d ON n.parent_id = d.id
+             WHERE n.workspace_id = ? AND n.is_deleted = 0
+           )
+           SELECT id FROM descendants
+         )`
+      );
+      baseBinds.push(getWorkspaceId(c), notebookId, getWorkspaceId(c));
+    } else {
+      baseConditions.push("m.notebook_id = ?");
+      baseBinds.push(notebookId);
+    }
   }
 
   if (filter === "tagged") {
@@ -2380,6 +2576,20 @@ app.notFound((c) =>
   )
 );
 
+app.onError((error, c) => {
+  if (error instanceof AppError) {
+    return apiError(c, error.code, error.message, error.status);
+  }
+
+  if (isDatabaseNotReadyError(error)) {
+    console.error("EdgeEver database readiness check failed", error);
+    return databaseNotReady(c);
+  }
+
+  console.error("Unhandled EdgeEver API error", error);
+  return apiError(c, "internal_error", "An unexpected server error occurred.", 500);
+});
+
 export default worker;
 
 type JsonRpcRequest = {
@@ -3293,13 +3503,37 @@ const decodeBase64Data = async (value: string) => {
 const escapeMarkdownImageAlt = (value: string) => value.replace(/[\\[\]]/g, "\\$&");
 const escapeMarkdownLinkLabel = (value: string) => value.replace(/[\\[\]]/g, "\\$&");
 
-const isAuthRequired = async (env: Bindings) => {
-  if (hasBootstrapCredential(env.EDGE_EVER_AUTH_PASSWORD, env.EDGE_EVER_AUTH_PASSWORD_HASH)) {
-    return true;
+const getInstanceAuthMode = async (env: Bindings): Promise<InstanceAuthMode> => {
+  if (!env.DB || typeof env.DB.prepare !== "function") {
+    throw new AppError(
+      "database_not_ready",
+      "Database is not ready. Bind the D1 database as DB and apply the remote migrations.",
+      503,
+    );
   }
 
-  const user = await env.DB.prepare(`SELECT id FROM users WHERE is_disabled = 0 LIMIT 1`).first<{ id: string }>();
-  return Boolean(user);
+  let user: { id: string } | null;
+  try {
+    user = await env.DB.prepare(`SELECT id FROM users WHERE is_disabled = 0 LIMIT 1`).first<{ id: string }>();
+  } catch (error) {
+    if (isDatabaseNotReadyError(error)) {
+      throw new AppError(
+        "database_not_ready",
+        "Database is not ready. Bind the D1 database as DB and apply the remote migrations.",
+        503,
+      );
+    }
+    throw error;
+  }
+
+  return resolveInstanceAuthMode({
+    allowUnauthenticated: isUnauthenticatedAccessEnabled(env.EDGE_EVER_ALLOW_UNAUTHENTICATED),
+    hasBootstrapCredential: hasBootstrapCredential(
+      env.EDGE_EVER_AUTH_PASSWORD,
+      env.EDGE_EVER_AUTH_PASSWORD_HASH,
+    ),
+    hasEnabledUser: Boolean(user),
+  });
 };
 
 const verifyLogin = async (env: Bindings, username: string, password: string): Promise<UserRow | null> => {
@@ -3307,7 +3541,19 @@ const verifyLogin = async (env: Bindings, username: string, password: string): P
   const existingUser = await getUserByUsername(env.DB, normalizedUsername);
 
   if (existingUser) {
-    return (await verifyPassword(password, existingUser.password_hash)) ? existingUser : null;
+    if (await verifyPassword(password, existingUser.password_hash)) {
+      return existingUser;
+    }
+
+    if (!isSupportedPasswordHash(existingUser.password_hash)) {
+      throw new AppError(
+        "password_hash_invalid",
+        "This account has an invalid password hash. Reset it with the EdgeEver password reset command.",
+        503,
+      );
+    }
+
+    return null;
   }
 
   const configuredHash = env.EDGE_EVER_AUTH_PASSWORD_HASH?.trim();
@@ -4963,13 +5209,41 @@ const ensureLocalDemoSeed = (env: Bindings) => {
   return localDemoSeedPromise;
 };
 
-const ensureDemoSeed = async (env: Bindings, options: { refreshResources?: boolean } = {}) => {
+const ensureDemoSeed = async (
+  env: Bindings,
+  options: { overwriteExisting?: boolean; refreshResources?: boolean } = {},
+) => {
   const db = env.DB;
   const now = isoNow();
   const statements: D1PreparedStatement[] = [];
   const bucketName = env.EDGE_EVER_R2_BUCKET_NAME?.trim() || DEFAULT_R2_BUCKET_NAME;
+  const overwriteExisting = options.overwriteExisting === true;
+  const existingNotebookIds = overwriteExisting
+    ? new Set<string>()
+    : new Set(
+        (
+          await db
+            .prepare(`SELECT id FROM notebooks WHERE id IN (${DEMO_SEED_NOTEBOOK_IDS.map(() => "?").join(", ")})`)
+            .bind(...DEMO_SEED_NOTEBOOK_IDS)
+            .all<{ id: string }>()
+        ).results.map((notebook) => notebook.id),
+      );
+  const existingMemoIds = overwriteExisting
+    ? new Set<string>()
+    : new Set(
+        (
+          await db
+            .prepare(`SELECT id FROM memos WHERE id IN (${DEMO_SEED_MEMO_IDS.map(() => "?").join(", ")})`)
+            .bind(...DEMO_SEED_MEMO_IDS)
+            .all<{ id: string }>()
+        ).results.map((memo) => memo.id),
+      );
 
   for (const notebook of DEMO_SEED_NOTEBOOKS) {
+    if (!shouldUpsertDemoSeedRecord(existingNotebookIds, notebook.id, overwriteExisting)) {
+      continue;
+    }
+
     statements.push(
       db
         .prepare(
@@ -5002,6 +5276,10 @@ const ensureDemoSeed = async (env: Bindings, options: { refreshResources?: boole
   }
 
   for (const memo of DEMO_SEED_MEMOS) {
+    if (!shouldUpsertDemoSeedRecord(existingMemoIds, memo.id, overwriteExisting)) {
+      continue;
+    }
+
     const contentJson = markdownToDoc(memo.markdown);
     const contentText = docToText(contentJson);
     const contentHash = await sha256(memo.markdown + JSON.stringify(contentJson));
@@ -5059,7 +5337,7 @@ const ensureDemoSeed = async (env: Bindings, options: { refreshResources?: boole
     );
   }
 
-  const existingResourceIds = options.refreshResources
+  const existingResourceIds = options.refreshResources || overwriteExisting
     ? new Set<string>()
     : new Set(
         (
@@ -5071,6 +5349,10 @@ const ensureDemoSeed = async (env: Bindings, options: { refreshResources?: boole
       );
 
   for (const resource of DEMO_SEED_RESOURCES) {
+    if (!shouldUpsertDemoSeedRecord(existingResourceIds, resource.id, overwriteExisting)) {
+      continue;
+    }
+
     const bytes = new TextEncoder().encode(resource.svg);
     const objectKey = `demo/${resource.memoId}/${resource.id}.svg`;
 
@@ -5130,7 +5412,9 @@ const ensureDemoSeed = async (env: Bindings, options: { refreshResources?: boole
     );
   }
 
-  await db.batch(statements);
+  if (statements.length > 0) {
+    await db.batch(statements);
+  }
 };
 
 const resetDemoData = async (env: Bindings, scheduledTime: number) => {
@@ -5177,7 +5461,7 @@ const resetDemoData = async (env: Bindings, scheduledTime: number) => {
 
   await db.batch(resetStatements);
 
-  await ensureDemoSeed(env, { refreshResources: true });
+  await ensureDemoSeed(env, { overwriteExisting: true, refreshResources: true });
   await audit(db, "system", null, "demo.reset", "demo", "edgeever-demo", {
     scheduledTime: new Date(scheduledTime).toISOString(),
     seedMemoCount: DEMO_SEED_MEMOS.length,
@@ -6108,6 +6392,22 @@ const apiError = (c: Context, code: string, message: string, status: number) =>
       },
     },
     status as 400
+  );
+
+const authNotConfigured = (c: Context) =>
+  apiError(
+    c,
+    "auth_not_configured",
+    "Authentication is not configured. Set EDGE_EVER_AUTH_PASSWORD as a Worker Secret and redeploy.",
+    503,
+  );
+
+const databaseNotReady = (c: Context) =>
+  apiError(
+    c,
+    "database_not_ready",
+    "Database is not ready. Bind the D1 database as DB and apply the remote migrations.",
+    503,
   );
 
 const conflict = (c: Context, code: string, message: string) =>
