@@ -35,7 +35,7 @@ The public demo resets every Monday at 1:00 AM (China Standard Time) and restore
 - EdgeEver ZIP import and export: one archive combines human-readable Markdown, Front Matter, nested notebook structure, and relative-path attachments with versioned structured data and revision history for complete recovery between EdgeEver instances.
 - AI Agent friendly: built-in MCP support lets tools such as Codex, Claude Code, and Antigravity read, organize, and maintain notes, while enabling integrations with Notion databases and Feishu Bitable.
 - Uncapped multi-device sync: self-hosted API means no restrictive commercial limits on the number of active login devices, supporting seamless synchronization across PC, tablet, and mobile (via PWA or browser).
-- Three-pane layout: notebook tree, note list, and main editor.
+- Three-pane layout: notebook tree, note list, and main editor, with a desktop focus mode that expands the selected note across the workspace.
 - Unlimited nested notebooks.
 - Rich text editing.
 - Switch between Markdown source and rich text views on desktop.
@@ -50,15 +50,15 @@ The public demo resets every Monday at 1:00 AM (China Standard Time) and restore
 
 ## Deployment
 
-### Deploy to Cloudflare (Recommended)
+Choose any one of the following three options to complete deployment.
+
+### Option A: Deploy to Cloudflare (Recommended)
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/tianma-if/edgeever)
 
-Cloudflare creates a GitHub repository for the installation, provisions the Worker, D1 database, and R2 bucket, requests the initial login password as a Secret, applies migrations, and connects Workers Builds. The generated repository checks for upstream EdgeEver updates daily; the default `stable` channel follows formal Releases, while the optional `edge` channel follows upstream `main`.
+One-click deployment creates a dedicated GitHub repository and the required Cloudflare resources, then automatically redeploys after the repository's daily upstream sync; see [Deploy EdgeEver with Cloudflare](docs/deploy-cloudflare-button.md) for setup and troubleshooting.
 
-See [Deploy EdgeEver with Cloudflare](docs/deploy-cloudflare-button.md) for setup, verification, update channels, and troubleshooting.
-
-### Deploy with an AI Agent
+### Option B: Deploy with an AI Agent
 
 > 💡 **Note:** Under the hood, AI Agent deployment uses the exact same deterministic CLI commands (Wrangler and Bun scripts) as the manual flow. The AI agent simply executes these standard commands in the terminal on your behalf for convenience; it is not a non-deterministic, black-box deployment.
  
@@ -80,9 +80,7 @@ After the first deployment, see [Cloudflare Workers Builds](docs/cloudflare-work
 
 > Common pitfall: Cloudflare R2, D1, and Workers may still require a Visa card during activation or usage, even when you stay within the free quotas.
 
-<p align="center">or</p>
-
-### Manual Deployment
+### Option C: Manual Deployment
 
 Please refer to the [Cloudflare Manual Deployment Guide](docs/manual-deploy.md) for advanced first-time installation, Cloudflare resource setup, troubleshooting, and emergency recovery. After the first deployment, connect Workers Builds; future repository updates deploy automatically.
 
