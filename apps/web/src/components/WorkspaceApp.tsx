@@ -795,7 +795,6 @@ export const WorkspaceApp = ({
   useEffect(() => {
     const english = i18n.resolvedLanguage === "en-US";
     const preferredNotebookId = english ? "nb_demo_features_en" : "nb_demo_features";
-    const alternateNotebookId = english ? "nb_demo_features" : "nb_demo_features_en";
 
     if (!notebooks.some((notebook) => notebook.id === preferredNotebookId)) {
       return;
@@ -803,11 +802,6 @@ export const WorkspaceApp = ({
 
     if (!autoSelectedDemoNotebookRef.current && selectedNotebookId === null) {
       autoSelectedDemoNotebookRef.current = true;
-      setSelectedNotebookId(preferredNotebookId);
-      return;
-    }
-
-    if (selectedNotebookId === alternateNotebookId) {
       setSelectedNotebookId(preferredNotebookId);
     }
   }, [i18n.resolvedLanguage, notebooks, selectedNotebookId]);
