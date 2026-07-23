@@ -1,6 +1,7 @@
 import type {
   ApiToken,
   AuthSession,
+  LoginInput,
   LoginDeviceSession,
   InstanceUser,
   CreatedApiToken,
@@ -181,7 +182,7 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
     revokeOtherLoginDeviceSessions: () =>
       request<{ ok: true }>("/api/v1/auth/sessions", { method: "DELETE" }),
 
-    login: (payload: { username: string; password: string }) =>
+    login: (payload: LoginInput) =>
       request<AuthSession>("/api/v1/auth/login", {
         method: "POST",
         body: JSON.stringify(payload),

@@ -374,7 +374,7 @@ const MobileNotebookPicker = ({
   onSelectAll: () => void;
   onSelect: (notebookId: string) => void;
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const listRef = useRef<HTMLDivElement | null>(null);
   const [notebookSearch, setNotebookSearch] = useState("");
   const tree = useMemo(() => buildNotebookTree(notebooks), [notebooks]);
@@ -641,7 +641,7 @@ export const WorkspaceApp = ({
   isLoggingOut: boolean;
   onLogout: () => void;
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const location = useLocation();
   const navigate = useNavigate();
@@ -651,6 +651,7 @@ export const WorkspaceApp = ({
   const [activePane, setActivePane] = useState<Pane>(() => (isInitialSettingsRoute && !isInitialMobileEditorReturn ? "editor" : "memos"));
   const [memoView, setMemoView] = useState<MemoView>(() => (isTrashRoute ? "trash" : "notebook"));
   const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(null);
+  const autoSelectedDemoNotebookRef = useRef(false);
   const [selectedMemoId, setSelectedMemoId] = useState<string | null>(null);
   const [createdMemoEditId, setCreatedMemoEditId] = useState<string | null>(null);
   const [selectedMemoIds, setSelectedMemoIds] = useState<Set<string>>(new Set());
@@ -661,6 +662,32 @@ export const WorkspaceApp = ({
   const [notebookNameDialog, setNotebookNameDialog] = useState<NotebookNameDialogState | null>(null);
   const [notebookDeleteConfirmation, setNotebookDeleteConfirmation] = useState<Notebook | null>(null);
   const [appNoticeDialog, setAppNoticeDialog] = useState<AppNoticeDialogState | null>(null);
+  const [demoResetConfirmationOpen, setDemoResetConfirmationOpen] = useState(false);
+
+  const resetDemoMutation = useMutation({
+    mutationFn: () => api.resetDemo(),
+    onSuccess: () => {
+      setDemoResetConfirmationOpen(false);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["memos"] }),
+        queryClient.invalidateQueries({ queryKey: ["memo"] }),
+        queryClient.invalidateQueries({ queryKey: ["notebooks"] }),
+        queryClient.invalidateQueries({ queryKey: ["resources"] }),
+        queryClient.invalidateQueries({ queryKey: ["tags"] }),
+      ]);
+      setAppNoticeDialog({
+        title: t("demo.resetSuccess"),
+        description: t("demo.resetSuccess"),
+      });
+    },
+    onError: () => {
+      setDemoResetConfirmationOpen(false);
+      setAppNoticeDialog({
+        title: t("demo.resetFailed"),
+        description: t("demo.resetFailed"),
+      });
+    },
+  });
   const [multiSelectKeyDown, setMultiSelectKeyDown] = useState(false);
   const [imageCompressionEnabled, setImageCompressionEnabled] = useState(readImageCompressionPreference);
   const [desktopFocusMode, setDesktopFocusMode] = useState(readDesktopFocusModePreference);
@@ -791,6 +818,20 @@ export const WorkspaceApp = ({
   });
 
   const notebooks = notebooksQuery.data?.notebooks ?? [];
+  useEffect(() => {
+    const english = i18n.resolvedLanguage === "en-US";
+    const preferredNotebookId = english ? "nb_demo_features_en" : "nb_demo_features";
+
+    if (!notebooks.some((notebook) => notebook.id === preferredNotebookId)) {
+      return;
+    }
+
+    if (!autoSelectedDemoNotebookRef.current && selectedNotebookId === null) {
+      autoSelectedDemoNotebookRef.current = true;
+      setSelectedNotebookId(preferredNotebookId);
+    }
+  }, [i18n.resolvedLanguage, notebooks, selectedNotebookId]);
+
   const mobileEditorReturnMemoId = getMobileEditorReturnMemoId(location.search);
   const visibleActivePane: Pane = mobileEditorReturnMemoId ? "memos" : activePane;
   const defaultMemoNotebookId =
@@ -2409,6 +2450,9 @@ export const WorkspaceApp = ({
                     setActivePane("memos");
                   }}
                   onEmptyTrash={handleEmptyTrash}
+                  demoMode={demoMode}
+                  onResetDemo={() => setDemoResetConfirmationOpen(true)}
+                  isResettingDemo={resetDemoMutation.isPending}
                 />
               </Suspense>
             )}
@@ -2570,6 +2614,7 @@ export const WorkspaceApp = ({
                     isTrashView={memoView === "trash"}
                     notebooks={notebooks}
                     isLoading={memoQuery.isLoading}
+                    contentSearchQuery={search}
                     searchFocusToken={noteSearchFocusToken}
                     replaceFocusToken={noteReplaceFocusToken}
                     imageCompressionEnabled={imageCompressionEnabled}
@@ -2702,6 +2747,18 @@ export const WorkspaceApp = ({
           tone="neutral"
           onCancel={() => setAppNoticeDialog(null)}
           onConfirm={() => setAppNoticeDialog(null)}
+        />
+      )}
+      {demoResetConfirmationOpen && (
+        <AppConfirmDialog
+          title={t("demo.resetTitle")}
+          description={t("demo.resetDescription")}
+          confirmLabel={t("demo.resetConfirm")}
+          cancelLabel={t("common.cancel")}
+          isWorking={resetDemoMutation.isPending}
+          tone="primary"
+          onCancel={() => setDemoResetConfirmationOpen(false)}
+          onConfirm={() => resetDemoMutation.mutate()}
         />
       )}
       {visibleActivePane !== "editor" && !memoSelectionModeActive && (

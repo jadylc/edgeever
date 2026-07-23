@@ -1462,6 +1462,12 @@
           },
           "password": {
             "type": "string"
+          },
+          "deviceId": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 160,
+            "description": "Stable client installation identifier used to replace older sessions from the same device"
           }
         },
         "required": ["username", "password"]

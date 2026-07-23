@@ -52,6 +52,28 @@ type ListUsersResponse = { users: InstanceUser[] };
 type UserResponse = { user: InstanceUser };
 type ListLoginDeviceSessionsResponse = { sessions: LoginDeviceSession[] };
 
+const WEB_DEVICE_ID_STORAGE_KEY = "edgeever.web.device-id";
+
+const createWebDeviceId = () => {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid
+    ? `web-${uuid}`
+    : `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+};
+
+const getOrCreateWebDeviceId = () => {
+  try {
+    const existing = window.localStorage.getItem(WEB_DEVICE_ID_STORAGE_KEY);
+    if (existing) return existing;
+
+    const deviceId = createWebDeviceId();
+    window.localStorage.setItem(WEB_DEVICE_ID_STORAGE_KEY, deviceId);
+    return deviceId;
+  } catch {
+    return createWebDeviceId();
+  }
+};
+
 type MemoResponse = {
   memo: MemoDetail;
 };
@@ -133,7 +155,7 @@ export const api = {
   login: (payload: { username: string; password: string }) =>
     request<AuthSession>("/api/v1/auth/login", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, deviceId: getOrCreateWebDeviceId() }),
     }),
 
   changePassword: (payload: { currentPassword: string; newPassword: string; confirmPassword: string }) =>
@@ -400,5 +422,10 @@ export const api = {
     request<MemoResponse>("/api/v1/memos/merge", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+
+  resetDemo: () =>
+    request<{ success: true }>("/api/v1/demo/reset", {
+      method: "POST",
     }),
 };
