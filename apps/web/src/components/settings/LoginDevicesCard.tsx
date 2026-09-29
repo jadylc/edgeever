@@ -1,14 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Laptop, MonitorSmartphone, Smartphone, Tablet } from "lucide-react";
+import { Check, Laptop, MonitorSmartphone, Pencil, Smartphone, Tablet, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  SETTINGS_CARD_HEADER_CLASSNAME,
+  SETTINGS_CARD_ICON_CLASSNAME,
+  SETTINGS_CARD_TITLE_CLASSNAME,
+  SETTINGS_ITEM_TITLE_CLASSNAME,
+} from "./settings-ui";
+import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { LoginSessionRevokeDialog, type LoginSessionRevokeTarget } from "./LoginSessionRevokeDialog";
 
 interface LoginDevicesCardProps {
   authRequired: boolean;
+  isLoggingOut: boolean;
+  onLogout: () => void;
 }
 
 type DeviceKind = "mobile" | "tablet" | "desktop" | "unknownDevice";
@@ -65,10 +74,12 @@ const formatSessionTime = (value: string, locale: string) =>
     minute: "2-digit",
   }).format(new Date(value));
 
-export const LoginDevicesCard = ({ authRequired }: LoginDevicesCardProps) => {
+export const LoginDevicesCard = ({ authRequired, isLoggingOut, onLogout }: LoginDevicesCardProps) => {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [revokeTarget, setRevokeTarget] = useState<LoginSessionRevokeTarget | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [labelDraft, setLabelDraft] = useState("");
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const sessionsQuery = useQuery({
     queryKey: ["auth", "sessions"],
@@ -85,6 +96,14 @@ export const LoginDevicesCard = ({ authRequired }: LoginDevicesCardProps) => {
       await queryClient.invalidateQueries({ queryKey: ["auth", "sessions"] });
     },
   });
+  const labelMutation = useMutation({
+    mutationFn: ({ sessionId, label }: { sessionId: string; label: string | null }) =>
+      api.updateLoginDeviceSession(sessionId, { label }),
+    onSuccess: async () => {
+      setEditingSessionId(null);
+      await queryClient.invalidateQueries({ queryKey: ["auth", "sessions"] });
+    },
+  });
 
   if (!authRequired) return null;
 
@@ -98,25 +117,26 @@ export const LoginDevicesCard = ({ authRequired }: LoginDevicesCardProps) => {
   return (
     <>
       <Card className="w-full min-w-0 overflow-hidden shadow-none">
-        <CardHeader className="p-4">
+        <CardHeader className={SETTINGS_CARD_HEADER_CLASSNAME}>
           <div>
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <MonitorSmartphone className="h-4 w-4 text-emerald-700" />
+            <CardTitle className={SETTINGS_CARD_TITLE_CLASSNAME}>
+              <MonitorSmartphone className={SETTINGS_CARD_ICON_CLASSNAME} />
               {t("loginDevices.title")}
             </CardTitle>
-            <CardDescription className="mt-1">{t("loginDevices.description")}</CardDescription>
           </div>
         </CardHeader>
         <CardContent className="p-4 pt-0">
-          {sessionsQuery.isLoading ? <p className="text-sm text-slate-500">{t("loginDevices.loading")}</p> : null}
-          {sessionsQuery.isError ? <p className="text-sm font-medium text-rose-600" role="alert">{t("loginDevices.loadFailed")}</p> : null}
-          {sessionsQuery.data?.sessions.length === 0 ? <p className="text-sm text-slate-500">{t("loginDevices.empty")}</p> : null}
+          {sessionsQuery.isLoading ? <p className="text-xs leading-5 text-slate-500">{t("loginDevices.loading")}</p> : null}
+          {sessionsQuery.isError ? <p className="text-xs font-medium leading-5 text-rose-600" role="alert">{t("loginDevices.loadFailed")}</p> : null}
+          {sessionsQuery.data?.sessions.length === 0 ? <p className="text-xs leading-5 text-slate-500">{t("loginDevices.empty")}</p> : null}
           {sessionsQuery.data?.sessions.length ? (
             <ul className="divide-y divide-slate-100">
               {sessionsQuery.data.sessions.map((session) => {
                 const { deviceKind, os, browser } = describeUserAgent(session.userAgent);
                 const DeviceIcon = getDeviceIcon(deviceKind);
                 const details = [os, browser || t("loginDevices.unknownBrowser")].filter(Boolean).join(" · ");
+                const location = [session.ipAddress, session.ipCountry, session.ipRegion].filter(Boolean).join(" · ");
+                const isEditing = editingSessionId === session.id;
 
                 return (
                   <li key={session.id} className="flex gap-3 py-3 first:pt-0 last:pb-0">
@@ -125,21 +145,68 @@ export const LoginDevicesCard = ({ authRequired }: LoginDevicesCardProps) => {
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-semibold text-slate-800">{t(`loginDevices.${deviceKind}`)}</p>
+                        {isEditing ? (
+                          <Input
+                            autoFocus
+                            maxLength={80}
+                            className="h-8 w-48"
+                            value={labelDraft}
+                            placeholder={t("loginDevices.labelPlaceholder")}
+                            onChange={(event) => setLabelDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") labelMutation.mutate({ sessionId: session.id, label: labelDraft.trim() || null });
+                              if (event.key === "Escape") setEditingSessionId(null);
+                            }}
+                          />
+                        ) : (
+                          <p className={SETTINGS_ITEM_TITLE_CLASSNAME}>{session.label || t(`loginDevices.${deviceKind}`)}</p>
+                        )}
                         {session.isCurrent ? (
-                          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-normal text-slate-700">
                             {t("loginDevices.current")}
                           </span>
                         ) : null}
                       </div>
                       <p className="mt-0.5 truncate text-xs text-slate-500" title={session.userAgent ?? undefined}>{details}</p>
+                      {location ? <p className="mt-0.5 truncate text-xs text-slate-500">{t("loginDevices.location", { location })}</p> : null}
                       <p className="mt-1 text-xs text-slate-500">
                         {t("loginDevices.lastSeen", { time: formatSessionTime(session.lastSeenAt, locale) })}
                         <span aria-hidden="true"> · </span>
                         {t("loginDevices.signedIn", { time: formatSessionTime(session.createdAt, locale) })}
                       </p>
                     </div>
-                    {!session.isCurrent ? (
+                    <div className="flex shrink-0 items-start gap-1">
+                      {isEditing ? (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            aria-label={t("loginDevices.saveLabel")}
+                            disabled={labelMutation.isPending}
+                            onClick={() => labelMutation.mutate({ sessionId: session.id, label: labelDraft.trim() || null })}
+                          ><Check className="h-4 w-4" /></Button>
+                          <Button size="icon" variant="ghost" aria-label={t("loginDevices.cancelLabel")} onClick={() => setEditingSessionId(null)}>
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          aria-label={t("loginDevices.editLabel")}
+                          onClick={() => { setEditingSessionId(session.id); setLabelDraft(session.label ?? ""); }}
+                        ><Pencil className="h-4 w-4" /></Button>
+                      )}
+                    {session.isCurrent ? (
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        disabled={isLoggingOut}
+                        onClick={onLogout}
+                      >
+                        {isLoggingOut ? t("session.loggingOut") : t("loginDevices.revokeDevice")}
+                      </Button>
+                    ) : (
                       <Button
                         size="sm"
                         variant="danger"
@@ -148,7 +215,8 @@ export const LoginDevicesCard = ({ authRequired }: LoginDevicesCardProps) => {
                       >
                         {t("loginDevices.revokeDevice")}
                       </Button>
-                    ) : null}
+                    )}
+                    </div>
                   </li>
                 );
               })}

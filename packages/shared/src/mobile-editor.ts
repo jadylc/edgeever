@@ -1,80 +1,59 @@
+import type { Editor } from "@tiptap/core";
+import { EditorState } from "@tiptap/pm/state";
 import type { ImageWidthPresetId } from "./image-display";
 
-export type MobileEditorLocale = "zh-CN" | "en-US";
+export type MobileEditorLocale = "zh-CN" | "en-US" | "ja";
 
 export type MobileEditorToolbarActionId =
+  | "undo"
+  | "redo"
   | "image"
-  | "mermaid"
   | "bold"
   | "bulletList"
+  | "taskList"
+  | "increaseListIndent"
+  | "decreaseListIndent"
   | "blockquote"
-  | "horizontalRule"
-  | MobileEditorTableActionId;
-
-export type MobileEditorTableActionId =
-  | "insertTable"
-  | "addTableRow"
-  | "deleteTableRow"
-  | "addTableColumn"
-  | "deleteTableColumn"
-  | "toggleTableHeader"
-  | "deleteTable";
+  | "horizontalRule";
 
 export const MOBILE_EDITOR_ACTIVE_FLAGS = {
   bold: 1,
-  mermaid: 2,
+  taskList: 2,
   bulletList: 8,
   blockquote: 16,
-  table: 32,
-  tableHeader: 64,
 } as const;
 
 export const MOBILE_EDITOR_TOOLBAR_ACTIONS = [
-  { id: "image", activeFlag: 0, requiresTable: false },
-  { id: "mermaid", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.mermaid, requiresTable: false },
-  { id: "bold", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.bold, requiresTable: false },
-  { id: "bulletList", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.bulletList, requiresTable: false },
-  { id: "blockquote", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.blockquote, requiresTable: false },
-  { id: "horizontalRule", activeFlag: 0, requiresTable: false },
-  { id: "insertTable", activeFlag: 0, requiresTable: false },
-  { id: "addTableRow", activeFlag: 0, requiresTable: true },
-  { id: "deleteTableRow", activeFlag: 0, requiresTable: true },
-  { id: "addTableColumn", activeFlag: 0, requiresTable: true },
-  { id: "deleteTableColumn", activeFlag: 0, requiresTable: true },
-  { id: "toggleTableHeader", activeFlag: 0, requiresTable: true },
-  { id: "deleteTable", activeFlag: 0, requiresTable: true },
+  { id: "undo", activeFlag: 0 },
+  { id: "redo", activeFlag: 0 },
+  { id: "image", activeFlag: 0 },
+  { id: "bold", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.bold },
+  { id: "bulletList", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.bulletList },
+  { id: "taskList", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.taskList },
+  { id: "increaseListIndent", activeFlag: 0 },
+  { id: "decreaseListIndent", activeFlag: 0 },
+  { id: "blockquote", activeFlag: MOBILE_EDITOR_ACTIVE_FLAGS.blockquote },
+  { id: "horizontalRule", activeFlag: 0 },
 ] as const satisfies ReadonlyArray<{
   id: MobileEditorToolbarActionId;
   activeFlag: number;
-  requiresTable: boolean;
 }>;
-
-export const isMobileEditorActionDisabledInTableHeader = (
-  action: MobileEditorToolbarActionId
-): boolean => action === "deleteTableRow";
 
 const MOBILE_EDITOR_COPY = {
   "zh-CN": {
     placeholder: "开始记录...",
     toolbar: "编辑器工具栏",
-    tableMenu: {
-      title: "表格操作",
-      close: "关闭",
-    },
     actions: {
+      undo: "撤销",
+      redo: "重做",
       image: "上传图片",
-      mermaid: "插入 Mermaid 图表",
       bold: "加粗",
       bulletList: "无序列表",
+      taskList: "任务清单",
+      increaseListIndent: "增加列表层级（Tab）",
+      decreaseListIndent: "减少列表层级（Shift + Tab）",
       blockquote: "引用",
       horizontalRule: "分割线",
-      insertTable: "插入表格",
-      addTableRow: "在下方添加行",
-      deleteTableRow: "删除当前行",
-      addTableColumn: "在右侧添加列",
-      deleteTableColumn: "删除当前列",
-      toggleTableHeader: "切换表头行",
-      deleteTable: "删除表格",
     },
     imageScale: "图片显示尺寸",
     imageSizes: {
@@ -87,24 +66,17 @@ const MOBILE_EDITOR_COPY = {
   "en-US": {
     placeholder: "Start writing...",
     toolbar: "Editor toolbar",
-    tableMenu: {
-      title: "Table actions",
-      close: "Close",
-    },
     actions: {
+      undo: "Undo",
+      redo: "Redo",
       image: "Upload image",
-      mermaid: "Insert Mermaid diagram",
       bold: "Bold",
       bulletList: "Bullet list",
+      taskList: "Task list",
+      increaseListIndent: "Increase list level (Tab)",
+      decreaseListIndent: "Decrease list level (Shift + Tab)",
       blockquote: "Quote",
       horizontalRule: "Horizontal rule",
-      insertTable: "Insert table",
-      addTableRow: "Add row below",
-      deleteTableRow: "Delete current row",
-      addTableColumn: "Add column right",
-      deleteTableColumn: "Delete current column",
-      toggleTableHeader: "Toggle header row",
-      deleteTable: "Delete table",
     },
     imageScale: "Image display size",
     imageSizes: {
@@ -114,6 +86,29 @@ const MOBILE_EDITOR_COPY = {
       full: "Full",
     },
   },
+  ja: {
+    placeholder: "書き始める...",
+    toolbar: "エディタのツールバー",
+    actions: {
+      undo: "元に戻す",
+      redo: "やり直す",
+      image: "画像をアップロード",
+      bold: "太字",
+      bulletList: "箇条書き",
+      taskList: "タスクリスト",
+      increaseListIndent: "リストの階層を上げる（Tab）",
+      decreaseListIndent: "リストの階層を下げる（Shift + Tab）",
+      blockquote: "引用",
+      horizontalRule: "区切り線",
+    },
+    imageScale: "画像の表示サイズ",
+    imageSizes: {
+      small: "小",
+      medium: "中",
+      large: "大",
+      full: "幅いっぱい",
+    },
+  },
 } as const;
 
 export const getMobileEditorPlaceholder = (locale: MobileEditorLocale): string =>
@@ -121,9 +116,6 @@ export const getMobileEditorPlaceholder = (locale: MobileEditorLocale): string =
 
 export const getMobileEditorToolbarLabel = (locale: MobileEditorLocale): string =>
   MOBILE_EDITOR_COPY[locale].toolbar;
-
-export const getMobileEditorTableMenuCopy = (locale: MobileEditorLocale) =>
-  MOBILE_EDITOR_COPY[locale].tableMenu;
 
 export const getMobileEditorToolbarActionLabel = (
   action: MobileEditorToolbarActionId,
@@ -137,6 +129,38 @@ export const getMobileEditorImageWidthPresetLabel = (
   preset: ImageWidthPresetId,
   locale: MobileEditorLocale
 ): string => MOBILE_EDITOR_COPY[locale].imageSizes[preset];
+
+/**
+ * Opening a note, restoring a draft, or applying a template replaces the
+ * document. That replacement must not become an undo step, or the first undo
+ * would wipe the note back to the previous document.
+ */
+export const clearMobileEditorUndoHistory = (editor: Editor): void => {
+  try {
+    const state = editor.state;
+    editor.view.updateState(EditorState.create({
+      doc: state.doc,
+      plugins: state.plugins,
+      schema: state.schema,
+      selection: state.selection,
+    }));
+    // updateState does not emit a transaction, so toolbar subscribers would
+    // keep the pre-reset undo flag. A no-step transaction refreshes them
+    // without recording a new history event or a save.
+    editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false).setMeta("preventUpdate", true));
+  } catch {
+    try {
+      const state = editor.state;
+      editor.view.updateState(EditorState.create({
+        doc: state.doc,
+        plugins: state.plugins,
+        schema: state.schema,
+      }));
+    } catch {
+      // The view is not mounted yet. The next user edit still starts a new history.
+    }
+  }
+};
 
 export const getMobileEditorInputAttributes = (className: string): Record<string, string> => ({
   autocapitalize: "sentences",

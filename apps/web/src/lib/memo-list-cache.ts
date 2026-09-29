@@ -29,6 +29,7 @@ const memoMatchesFilter = (memo: MemoSummary, filterMode: unknown) => {
 const memoMatchesStaticListConstraints = (memo: MemoSummary, queryKey: readonly unknown[]) => {
   const [, view, notebookId, , filterMode] = queryKey;
   const notebookIds = Array.isArray(queryKey[6]) ? queryKey[6] : [];
+  const tag = typeof queryKey[7] === "string" ? queryKey[7].trim().toLocaleLowerCase() : "";
   const memoView = view === "trash" ? "trash" : "notebook";
 
   if ((memoView === "trash") !== memo.isDeleted) {
@@ -41,6 +42,10 @@ const memoMatchesStaticListConstraints = (memo: MemoSummary, queryKey: readonly 
     notebookId &&
     !(notebookIds.length > 0 ? notebookIds.includes(memo.notebookId) : memo.notebookId === notebookId)
   ) {
+    return false;
+  }
+
+  if (tag && !memo.tags.some((memoTag) => memoTag.toLocaleLowerCase() === tag)) {
     return false;
   }
 
@@ -102,6 +107,47 @@ const reflowMemoListPages = (current: MemoListQueryData, memos: MemoSummary[], t
       };
     }),
   };
+};
+
+export const remapMemoIdsInLists = (
+  queryClient: QueryClient,
+  memoIdMappings: ReadonlyMap<string, string>,
+) => {
+  if (memoIdMappings.size === 0) {
+    return;
+  }
+
+  for (const [queryKey, current] of queryClient.getQueriesData<MemoListQueryData>({ queryKey: ["memos"] })) {
+    if (!current) {
+      continue;
+    }
+
+    const flatMemos = current.pages.flatMap((page) => page.memos);
+    let changed = false;
+    const remappedMemos = flatMemos.map((memo) => {
+      const nextId = memoIdMappings.get(memo.id);
+      if (!nextId || nextId === memo.id) {
+        return memo;
+      }
+
+      changed = true;
+      return { ...memo, id: nextId };
+    });
+
+    if (!changed) {
+      continue;
+    }
+
+    const nextMemos = deduplicateMemoSummaries(remappedMemos);
+    const removed = remappedMemos.length - nextMemos.length;
+    const currentTotalCount = current.pages[0]?.totalCount ?? flatMemos.length;
+    const totalCount = Math.max(nextMemos.length, currentTotalCount - removed);
+
+    queryClient.setQueryData(
+      queryKey,
+      reflowMemoListPages(current, sortMemoSummariesForList(nextMemos, queryKey), totalCount),
+    );
+  }
 };
 
 export const updateMemoSummaryInLists = (queryClient: QueryClient, summary: MemoSummary) => {

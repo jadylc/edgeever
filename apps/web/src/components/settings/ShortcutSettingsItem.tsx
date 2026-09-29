@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ShortcutAction, ShortcutBinding, ShortcutSettings } from "@/lib/app-helpers";
 import {
@@ -10,15 +10,8 @@ import {
   shortcutBindingsEqual,
 } from "@/lib/app-helpers";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { SETTINGS_ITEM_TITLE_CLASSNAME } from "./settings-ui";
 
 interface ShortcutSettingsItemProps {
   shortcutSettings: ShortcutSettings;
@@ -34,19 +27,10 @@ const getConflictAction = (
 
 export const ShortcutSettingsItem = ({ shortcutSettings, onShortcutSettingsChange }: ShortcutSettingsItemProps) => {
   const { t } = useTranslation();
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
   const [captureMessage, setCaptureMessage] = useState("");
   const captureButtonRef = useRef<HTMLButtonElement | null>(null);
   const shortcutActionOptions = useMemo(() => getShortcutActionOptions(t), [t]);
-
-  const shortcutSummary = useMemo(
-    () =>
-      shortcutActionOptions.map((item) => formatShortcutBinding(shortcutSettings[item.value]))
-        .slice(0, 3)
-        .join(" / "),
-    [shortcutActionOptions, shortcutSettings]
-  );
 
   useEffect(() => {
     if (!recordingAction) {
@@ -102,80 +86,48 @@ export const ShortcutSettingsItem = ({ shortcutSettings, onShortcutSettingsChang
   };
 
   return (
-    <>
-      <div className="flex min-h-16 flex-col items-start gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <Keyboard className="h-4 w-4 text-emerald-700" />
-            {t("shortcuts.title")}
-          </div>
-          <div className="mt-0.5 truncate text-xs leading-4 text-slate-500">{shortcutSummary}</div>
+    <div className="overflow-hidden rounded-xl border border-slate-200 bg-card">
+      <div className="grid grid-cols-1 gap-px bg-slate-100 sm:grid-cols-2">
+        {shortcutActionOptions.map((item, index) => {
+          const recording = recordingAction === item.value;
+          const lastAlone = index === shortcutActionOptions.length - 1 && shortcutActionOptions.length % 2 === 1;
+
+          return (
+            <div
+              key={item.value}
+              className={cn(
+                "flex h-12 items-center justify-between gap-3 bg-card px-4",
+                lastAlone && "sm:col-span-2",
+              )}
+            >
+              <div className={cn("min-w-0 truncate", SETTINGS_ITEM_TITLE_CLASSNAME)}>{item.label}</div>
+              <Button
+                ref={recording ? captureButtonRef : null}
+                type="button"
+                variant={recording ? "solid" : "outline"}
+                className={cn("h-8 min-w-24 shrink-0 px-3 font-mono text-xs font-normal", !recording && "bg-card")}
+                onClick={() => {
+                  setRecordingAction(item.value);
+                  setCaptureMessage("");
+                }}
+              >
+                {recording ? t("shortcuts.recording") : formatShortcutBinding(shortcutSettings[item.value])}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+      {captureMessage ? (
+        <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-700">
+          {captureMessage}
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 w-full bg-white px-3 text-xs sm:w-auto"
-          type="button"
-          onClick={() => setShortcutsOpen(true)}
-        >
-          {t("shortcuts.manage")}
+      ) : null}
+      <div className="flex justify-end border-t border-slate-100 px-4 py-3">
+        <Button type="button" variant="outline" className="h-9 px-3 text-xs font-normal" onClick={handleResetShortcuts}>
+          <RotateCcw className="h-4 w-4" />
+          {t("shortcuts.reset")}
         </Button>
       </div>
-
-      <Dialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>
-        <DialogContent className="max-h-[min(640px,calc(100vh-2rem))] max-w-xl overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Keyboard className="h-5 w-5 text-emerald-700" />
-              {t("shortcuts.title")}
-            </DialogTitle>
-            <DialogDescription>{t("shortcuts.description")}</DialogDescription>
-          </DialogHeader>
-
-          <div className="grid gap-3">
-            {shortcutActionOptions.map((item) => {
-              const recording = recordingAction === item.value;
-
-              return (
-                <div
-                  key={item.value}
-                  className="flex min-w-0 flex-col gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold text-slate-900">{item.label}</div>
-                    <div className="mt-0.5 text-xs leading-4 text-slate-500">{item.description}</div>
-                  </div>
-                  <Button
-                    ref={recording ? captureButtonRef : null}
-                    type="button"
-                    variant={recording ? "solid" : "outline"}
-                    className={cn("h-9 min-w-32 px-3 font-mono text-xs", !recording && "bg-white")}
-                    onClick={() => {
-                      setRecordingAction(item.value);
-                      setCaptureMessage("");
-                    }}
-                  >
-                    {recording ? t("shortcuts.recording") : formatShortcutBinding(shortcutSettings[item.value])}
-                  </Button>
-                </div>
-              );
-            })}
-          </div>
-
-          {captureMessage ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
-              {captureMessage}
-            </div>
-          ) : null}
-
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={handleResetShortcuts}>
-              <RotateCcw className="h-4 w-4" />
-              {t("shortcuts.reset")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+    </div>
   );
 };

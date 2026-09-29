@@ -1,46 +1,34 @@
 # Cloudflare Workers Builds
 
-Cloudflare Workers Builds deploys EdgeEver whenever `main` changes. Cloudflare one-click deployment connects it automatically; CLI installations use local `bun run deploy:manual` only for first installation or emergency recovery.
-
 ## Setup
 
-Cloudflare one-click installations do not need this setup command. For CLI or Agent installations, complete the [first deployment](manual-deploy.md), then run:
+For a manual import, follow the [online deployment guide](deploy-cloudflare-button.md), use the repository root and `main` branch, and keep the default `npx wrangler deploy` command. Existing projects can keep their explicit build and `bun run deploy:cloudflare-builds` commands.
 
-```sh
-bun run deploy:builds:setup
-```
+Authorization:
 
-The command reads the repository remote and `.env.local`, configures the build, and starts one verification build on first setup. It is safe to rerun after instance settings change.
+1. Approve the **Cloudflare Workers & Pages** GitHub App for the deployment repository.
+2. If the Agent integration needs a Cloudflare API token, use a User API Token limited to the target account.
+3. Configure the deployment API token in Cloudflare under **Worker -> Settings -> Build -> API token**. The automatically generated token may lack D1 permissions; confirm it has D1 read and edit permissions for the target account before deploying.
 
-Only complete the following steps when the command asks for them.
+Set `EDGE_EVER_AUTH_PASSWORD` as a runtime Secret under the Worker's **Settings → Variables and Secrets**, not as a Builds variable.
 
-### GitHub authorization
+Ordinary deployments use D1 `edgeever`, R2 `edgeever-resources`, and username `admin`. Put optional non-secret instance settings under **Settings → Build → Build variables and secrets**. These variables are available only during the build; the deploy command uses them to generate a temporary Wrangler configuration. Keep the tracked `wrangler.toml` unchanged.
 
-Approve installation of the **Cloudflare Workers & Pages** GitHub App for the deployment repository. This is the app's name; an EdgeEver instance does not require a Pages project. The command handles the repository connection after authorization.
+Without an explicit override, existing deployments keep their current R2 bucket and administrator username.
 
-### Configuration API token
+## Updates and troubleshooting
 
-If `EDGE_EVER_BUILDS_API_TOKEN` is missing, create a custom **User API Token** at [My Profile -> API Tokens](https://dash.cloudflare.com/profile/api-tokens) with:
-
-- **Account** -> **Workers Builds Configuration** -> **Edit**
-- **Account** -> **Workers Scripts** -> **Read**
-
-Do not use an Account API Token or a prebuilt template. Limit the token to the relevant account, then save the value shown by Cloudflare once in `.env.local`:
-
-```text
-EDGE_EVER_BUILDS_API_TOKEN=<token>
-```
-
-Never commit or share this token.
-
-![Redacted Cloudflare User API Token permissions](assets/cloudflare-workers-builds-user-token.svg)
-
-### Deployment API token
-
-If the command reports that no deployment API token is available, open **Worker** -> **Settings** -> **Builds** -> **API token** and create or select one that can deploy the Worker and update D1 and R2, then rerun the command. When several are available, select one by name in the terminal.
-
-## Updates and Troubleshooting
-
-After setup, every push to `main` makes Cloudflare install dependencies, check and build the app, apply new D1 migrations, deploy the Worker, and verify the result. The **Update deployed EdgeEver** GitHub workflow supplies upstream updates daily: `stable` follows formal Releases by default, while the repository variable `EDGE_EVER_UPDATE_CHANNEL=edge` follows upstream `main`. No Cloudflare deployment secrets or local redeployment are required in GitHub Actions.
-
-If a build fails, inspect its log in the Worker **Deployments** tab. Rerun `bun run deploy:builds:setup` when instance settings change.
+- A push to `main` builds, applies D1 migrations, deploys, and verifies EdgeEver.
+- **Update deployed EdgeEver** keeps a deployment Fork as an upstream **deploy mirror**:
+  - Default channel `stable` tracks the latest formal Release tag.
+  - Set the GitHub Repository Variable `EDGE_EVER_UPDATE_CHANNEL=edge` to follow upstream `main`.
+  - Read-only forks (no app code changes) apply the target's product snapshot in a new linear commit without installing dependencies or running the project test suite.
+  - Only forks that explicitly set `EDGE_EVER_PRESERVE_FORK_CHANGES=true` merge product changes. A customized merge runs local migrations, the complete non-E2E test suite, type checks, and the production build before pushing; any failure leaves `main` and production unchanged.
+  - Updates preserve the Fork's `.github/workflows/**` and updater helper scripts; `GITHUB_TOKEN` needs no permission to rewrite Actions workflows.
+  - The job **Summary** shows Git and deployment status. *Already on upstream target* means a scheduled run requested no deployment; a successful push still needs confirmation in Cloudflare.
+  - Prefer this workflow over GitHub **Sync fork**. Sync fork follows upstream `main` history and can make the next stable run a deliberate no-op.
+- Optional: repository secret `EDGE_EVER_CLOUDFLARE_DEPLOY_HOOK_URL` triggers a Cloudflare Deploy Hook after a successful push (useful when the Git integration misses a push).
+- Manually running the workflow triggers a new Cloudflare build even when Git is current.
+- Build failure: inspect the Worker **Deployments** log and confirm the Deployment commit SHA matches Fork `main`.
+- Scheduled update never runs: on a public Fork, enable **Update deployed EdgeEver** under **Actions** (scheduled workflows are disabled by default on forks, and may pause after long inactivity).
+- Update push is rejected with `without workflows permission`: the Fork still has an older updater. Use GitHub **Sync fork** once with the repository owner's permission, then re-run **Update deployed EdgeEver**. Routine product updates do not require **Sync fork** after that bootstrap.
