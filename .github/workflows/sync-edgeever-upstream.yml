@@ -301,8 +301,23 @@ jobs:
             exit 1
           fi
 
+          # Deployment Forks keep a snapshot commit so GITHUB_TOKEN never has to
+          # modify .github/workflows/**. That leaves the Fork hundreds of commits
+          # "behind" upstream on GitHub even when the product tree already
+          # matches. Record the upstream target as a second parent of an extra
+          # commit: its tree is byte-identical to the snapshot above, so the
+          # pushed diff still touches no workflow file, while the Fork's history
+          # (and the GitHub "up to date" indicator) reflects the upstream commit.
+          snapshot_commit="$(git rev-parse HEAD)"
+          merge_commit="$(git commit-tree "$(git rev-parse HEAD^{tree})" \
+            -p "${snapshot_commit}" \
+            -p "${TARGET_COMMIT}" \
+            -m "chore: align EdgeEver history with ${TARGET_REF}" \
+            -m "EdgeEver-Upstream-Commit: ${TARGET_COMMIT}")"
+          git reset --hard "${merge_commit}"
+
           git push origin HEAD:main
-          echo "mode=${ALIGN_MODE}_commit" >> "${GITHUB_OUTPUT}"
+          echo "mode=${ALIGN_MODE}_merge_commit" >> "${GITHUB_OUTPUT}"
           echo "Published ${ALIGN_MODE} update for ${TARGET_REF} without changing downstream workflows."
 
       - name: Request Cloudflare deployment
